@@ -13,6 +13,9 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
+import psycopg
+from psycopg.rows import dict_row
+
 from dotenv import load_dotenv
 from flask import (
     Flask,
@@ -34,8 +37,11 @@ load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_DB = BASE_DIR / "instance" / "friends.db"
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+USE_POSTGRES = DATABASE_URL.startswith(("postgres://", "postgresql://"))
 DATABASE_PATH = Path(os.getenv("DATABASE_PATH", str(DEFAULT_DB)))
-DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
+if not USE_POSTGRES:
+    DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", str(BASE_DIR / "instance" / "uploads")))
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 MAX_UPLOAD_MB = max(1, int(os.getenv("MAX_UPLOAD_MB", "25")))
@@ -70,7 +76,14 @@ active_call: dict[str, str] | None = None
 F = TypeVar("F", bound=Callable[..., Any])
 
 
-def db_connect() -> sqlite3.Connection:
+DbRow = sqlite3.Row | dict[str, Any]
+
+
+def db_connect() -> sqlite3.Connection | psycopg.Connection[Any]:
+    """Use cloud Postgres when DATABASE_URL exists; otherwise use local SQLite."""
+    if USE_POSTGRES:
+        return psycopg.connect(DATABASE_URL, row_factory=dict_row)
+
     connection = sqlite3.connect(DATABASE_PATH, timeout=10)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
@@ -78,7 +91,33 @@ def db_connect() -> sqlite3.Connection:
     return connection
 
 
-def init_db() -> None:
+def db_execute(
+    db: sqlite3.Connection | psycopg.Connection[Any],
+    query: str,
+    params: tuple[Any, ...] = (),
+) -> Any:
+    if USE_POSTGRES:
+        query = query.replace("?", "%s")
+    return db.execute(query, params)
+
+
+def insert_and_get_id(
+    db: sqlite3.Connection | psycopg.Connection[Any],
+    query: str,
+    params: tuple[Any, ...],
+) -> int:
+    if USE_POSTGRES:
+        clean_query = query.strip().rstrip(";") + " RETURNING id"
+        row = db_execute(db, clean_query, params).fetchone()
+        if not row:
+            raise RuntimeError("The database did not return the new row ID.")
+        return int(row["id"])
+
+    cursor = db_execute(db, query, params)
+    return int(cursor.lastrowid)
+
+
+def init_sqlite_db() -> None:
     with db_connect() as db:
         db.executescript(
             """
@@ -113,15 +152,11 @@ def init_db() -> None:
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             );
 
-            CREATE INDEX IF NOT EXISTS idx_messages_sent_at
-            ON messages(sent_at);
-
-            CREATE INDEX IF NOT EXISTS idx_reactions_message
-            ON message_reactions(message_id);
+            CREATE INDEX IF NOT EXISTS idx_messages_sent_at ON messages(sent_at);
+            CREATE INDEX IF NOT EXISTS idx_reactions_message ON message_reactions(message_id);
             """
         )
 
-        # Upgrade databases created by earlier versions without deleting messages.
         existing_columns = {
             str(row["name"])
             for row in db.execute("PRAGMA table_info(messages)").fetchall()
@@ -137,6 +172,58 @@ def init_db() -> None:
             if column_name not in existing_columns:
                 db.execute(statement)
 
+
+def init_postgres_db() -> None:
+    statements = [
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            id BIGSERIAL PRIMARY KEY,
+            username VARCHAR(24) NOT NULL,
+            password_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """,
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_lower ON users (LOWER(username))",
+        """
+        CREATE TABLE IF NOT EXISTS messages (
+            id BIGSERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            body TEXT NOT NULL DEFAULT '',
+            sent_at TEXT NOT NULL,
+            message_type TEXT NOT NULL DEFAULT 'text',
+            attachment_url TEXT,
+            attachment_name TEXT,
+            attachment_mime TEXT,
+            reply_to_id BIGINT REFERENCES messages(id) ON DELETE SET NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS message_reactions (
+            message_id BIGINT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+            user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            emoji TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (message_id, user_id)
+        )
+        """,
+        "ALTER TABLE messages ADD COLUMN IF NOT EXISTS message_type TEXT NOT NULL DEFAULT 'text'",
+        "ALTER TABLE messages ADD COLUMN IF NOT EXISTS attachment_url TEXT",
+        "ALTER TABLE messages ADD COLUMN IF NOT EXISTS attachment_name TEXT",
+        "ALTER TABLE messages ADD COLUMN IF NOT EXISTS attachment_mime TEXT",
+        "ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_to_id BIGINT REFERENCES messages(id) ON DELETE SET NULL",
+        "CREATE INDEX IF NOT EXISTS idx_messages_sent_at ON messages(sent_at)",
+        "CREATE INDEX IF NOT EXISTS idx_reactions_message ON message_reactions(message_id)",
+    ]
+    with db_connect() as db:
+        for statement in statements:
+            db.execute(statement)
+
+
+def init_db() -> None:
+    if USE_POSTGRES:
+        init_postgres_db()
+    else:
+        init_sqlite_db()
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -169,20 +256,20 @@ def login_required(view: F) -> F:
     return wrapped  # type: ignore[return-value]
 
 
-def current_user() -> sqlite3.Row | None:
+def current_user() -> DbRow | None:
     user_id = session.get("user_id")
     if not user_id:
         return None
     with db_connect() as db:
-        return db.execute(
+        return db_execute(db, 
             "SELECT id, username, created_at FROM users WHERE id = ?", (user_id,)
         ).fetchone()
 
 
 def all_members() -> list[str]:
     with db_connect() as db:
-        rows = db.execute(
-            "SELECT username FROM users ORDER BY username COLLATE NOCASE"
+        rows = db_execute(db, 
+            "SELECT username FROM users ORDER BY LOWER(username)"
         ).fetchall()
     return [str(row["username"]) for row in rows]
 
@@ -193,13 +280,13 @@ def reaction_summaries(message_ids: list[int]) -> dict[int, list[dict[str, Any]]
 
     placeholders = ",".join("?" for _ in message_ids)
     with db_connect() as db:
-        rows = db.execute(
+        rows = db_execute(db, 
             f"""
             SELECT message_reactions.message_id, message_reactions.emoji, users.username
             FROM message_reactions
             JOIN users ON users.id = message_reactions.user_id
             WHERE message_reactions.message_id IN ({placeholders})
-            ORDER BY message_reactions.created_at, users.username COLLATE NOCASE
+            ORDER BY message_reactions.created_at, LOWER(users.username)
             """,
             tuple(message_ids),
         ).fetchall()
@@ -219,7 +306,7 @@ def reaction_summaries(message_ids: list[int]) -> dict[int, list[dict[str, Any]]
     return result
 
 
-def reply_preview_from_row(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any] | None:
+def reply_preview_from_row(row: DbRow) -> dict[str, Any] | None:
     reply_id = row["reply_to_id"] if "reply_to_id" in row.keys() else None
     if not reply_id:
         return None
@@ -234,7 +321,7 @@ def reply_preview_from_row(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any] 
 
 def recent_messages(limit: int = 100) -> list[dict[str, Any]]:
     with db_connect() as db:
-        rows = db.execute(
+        rows = db_execute(db, 
             """
             SELECT messages.id, users.username, messages.body, messages.sent_at,
                    messages.message_type, messages.attachment_url,
@@ -319,7 +406,7 @@ def get_reply_preview(reply_to_id: int | None) -> dict[str, Any] | None:
     if not reply_to_id:
         return None
     with db_connect() as db:
-        row = db.execute(
+        row = db_execute(db, 
             """
             SELECT messages.id AS reply_to_id, users.username AS reply_username,
                    messages.body AS reply_body, messages.message_type AS reply_message_type,
@@ -355,7 +442,8 @@ def save_message(
     valid_reply_id = int(reply_to["id"]) if reply_to else None
     sent_at = utc_now()
     with db_connect() as db:
-        cursor = db.execute(
+        message_id = insert_and_get_id(
+            db,
             """
             INSERT INTO messages (
                 user_id, body, sent_at, message_type, attachment_url,
@@ -373,7 +461,6 @@ def save_message(
                 valid_reply_id,
             ),
         )
-        message_id = int(cursor.lastrowid)
 
     return message_payload(
         message_id,
@@ -431,11 +518,11 @@ def register() -> Any:
         else:
             try:
                 with db_connect() as db:
-                    cursor = db.execute(
+                    user_id = insert_and_get_id(
+                        db,
                         "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
                         (username, generate_password_hash(password), utc_now()),
                     )
-                    user_id = cursor.lastrowid
 
                 session.clear()
                 session["user_id"] = user_id
@@ -444,7 +531,7 @@ def register() -> Any:
                 csrf_token()
                 flash("Welcome! You are now in the friends chat.", "success")
                 return redirect(url_for("chat"))
-            except sqlite3.IntegrityError:
+            except (sqlite3.IntegrityError, psycopg.IntegrityError):
                 flash("That username is already taken.", "error")
 
     return render_template("register.html")
@@ -465,8 +552,8 @@ def login() -> Any:
         remember_me = request.form.get("remember_me") == "on"
 
         with db_connect() as db:
-            user = db.execute(
-                "SELECT id, username, password_hash FROM users WHERE username = ? COLLATE NOCASE",
+            user = db_execute(db, 
+                "SELECT id, username, password_hash FROM users WHERE LOWER(username) = LOWER(?)",
                 (username,),
             ).fetchone()
 
@@ -729,25 +816,25 @@ def handle_toggle_reaction(payload: Any) -> None:
         return
 
     with db_connect() as db:
-        message_exists = db.execute(
+        message_exists = db_execute(db, 
             "SELECT 1 FROM messages WHERE id = ?", (message_id,)
         ).fetchone()
         if not message_exists:
             emit("chat_error", {"message": "That message is no longer available."})
             return
 
-        existing = db.execute(
+        existing = db_execute(db, 
             "SELECT emoji FROM message_reactions WHERE message_id = ? AND user_id = ?",
             (message_id, int(user_id)),
         ).fetchone()
 
         if existing and str(existing["emoji"]) == emoji:
-            db.execute(
+            db_execute(db, 
                 "DELETE FROM message_reactions WHERE message_id = ? AND user_id = ?",
                 (message_id, int(user_id)),
             )
         elif existing:
-            db.execute(
+            db_execute(db, 
                 """
                 UPDATE message_reactions
                 SET emoji = ?, created_at = ?
@@ -756,7 +843,7 @@ def handle_toggle_reaction(payload: Any) -> None:
                 (emoji, utc_now(), message_id, int(user_id)),
             )
         else:
-            db.execute(
+            db_execute(db, 
                 """
                 INSERT INTO message_reactions (message_id, user_id, emoji, created_at)
                 VALUES (?, ?, ?, ?)
