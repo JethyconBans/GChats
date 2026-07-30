@@ -748,6 +748,30 @@ def upload_too_large(error: RequestEntityTooLarge) -> Any:
     return "File too large", 413
 
 
+@app.get("/.well-known/assetlinks.json")
+def android_asset_links() -> Any:
+    """Expose Digital Asset Links for the signed Android app."""
+    package_name = os.getenv("ANDROID_PACKAGE_NAME", "com.kulot.friends").strip()
+    fingerprint = os.getenv("ANDROID_SHA256_FINGERPRINT", "").strip().upper()
+
+    payload: list[dict[str, Any]] = []
+    if package_name and fingerprint:
+        payload.append(
+            {
+                "relation": ["delegate_permission/common.handle_all_urls"],
+                "target": {
+                    "namespace": "android_app",
+                    "package_name": package_name,
+                    "sha256_cert_fingerprints": [fingerprint],
+                },
+            }
+        )
+
+    response = jsonify(payload)
+    response.headers["Cache-Control"] = "public, max-age=300"
+    return response
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}

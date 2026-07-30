@@ -19,3 +19,7 @@ services:
         value: "90"
       - key: HISTORY_PAGE_SIZE
         value: "50"
+      - key: ANDROID_PACKAGE_NAME
+        value: "com.kulot.friends"
+      - key: ANDROID_SHA256_FINGERPRINT
+        sync: false
