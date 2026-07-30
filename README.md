@@ -129,3 +129,9 @@ Do not commit private long-term credentials to GitHub.
 - Add a TURN server for reliable calls across different networks.
 - Use persistent storage or PostgreSQL before relying on message history.
 - Add account administration before sharing beyond close friends.
+
+## Messenger-style update
+
+This build includes a mobile Messenger-style conversation layout, online friend circles, message bubbles, message notifications, and a "Stay signed in" option.
+
+The application does **not** save readable passwords. When "Stay signed in" is checked, Flask stores a signed login cookie for the number of days configured by `REMEMBER_DAYS` (90 by default). Logging out, clearing browser data, private browsing, changing `SECRET_KEY`, or losing the user database requires logging in again.

@@ -1,0 +1,30 @@
+KULOT FRIENDS - PERMANENT ACCOUNTS UPDATE
+
+This update stores account usernames, password hashes, messages, replies, and
+reactions in PostgreSQL when DATABASE_URL is configured. Passwords are never
+stored as readable text.
+
+FILES TO COPY INTO YOUR CURRENT PROJECT:
+- app.py
+- requirements.txt
+- render.yaml
+- .env.example (optional; do not overwrite your real .env)
+
+LOCAL TEST:
+1. Activate venv.
+2. Run: python -m pip install -r requirements.txt
+3. Run: python smoke_test.py
+4. Run: python app.py
+
+CLOUD SETUP:
+1. Create a free Neon PostgreSQL project.
+2. Copy its pooled PostgreSQL connection string.
+3. In Render > kulot-friends-chat > Environment, add:
+   DATABASE_URL = your Neon connection string
+4. Save and redeploy.
+5. Register accounts one final time. They will then remain after Render deploys.
+
+UPLOAD WARNING:
+Pictures/videos still use Render's temporary filesystem. This update makes
+accounts and database messages permanent, but uploaded media files need cloud
+object storage for permanent retention.

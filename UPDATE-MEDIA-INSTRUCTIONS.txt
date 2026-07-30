@@ -1,0 +1,23 @@
+KULOT FRIENDS — PICTURE, VIDEO, AND LINK UPDATE
+
+1. Stop the local server with Ctrl+C.
+2. Copy this project's files over your current C:\PY_project\kulot-friends-chat folder.
+3. Do not delete your .env file or instance\friends.db.
+4. Activate venv and test:
+
+   cd C:\PY_project\kulot-friends-chat
+   .\venv\Scripts\Activate.ps1
+   python smoke_test.py
+   python app.py
+
+5. In chat, press + and choose Picture, Video, or Link.
+6. Update GitHub and Render:
+
+   git add .
+   git commit -m "Add picture video and link messages"
+   git push origin main
+
+Render will deploy automatically. Wait for Deploy live and refresh with Ctrl+F5.
+
+Default maximum upload size is 25 MB. Change MAX_UPLOAD_MB in .env or Render Environment if needed.
+IMPORTANT: Render free storage is temporary. Uploaded media can disappear after restart or redeploy.

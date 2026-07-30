@@ -959,3 +959,21 @@ h1, p { margin-top: 0; }
     .emoji-picker { grid-template-columns: repeat(7, 1fr); }
     .message-reaction-option { width: 33px; height: 33px; }
 }
+
+
+/* Permanent conversation history */
+.history-status {
+    align-self: center;
+    margin: 8px auto 0;
+    padding: 6px 12px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--muted, #aeb4bf);
+    font-size: 0.78rem;
+    line-height: 1.2;
+    text-align: center;
+}
+
+.history-status.hidden {
+    display: none;
+}

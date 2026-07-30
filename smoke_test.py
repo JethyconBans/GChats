@@ -17,6 +17,8 @@ os.environ["DATABASE_PATH"] = str(TEST_DB)
 os.environ["INVITE_CODE"] = "TEST-CODE"
 os.environ["SECRET_KEY"] = "test-secret-only"
 os.environ["UPLOAD_DIR"] = str(TEST_UPLOAD_DIR)
+os.environ.pop("DATABASE_URL", None)
+os.environ.pop("CLOUDINARY_URL", None)
 
 from app import app, socketio  # noqa: E402
 
@@ -102,7 +104,21 @@ def main() -> None:
     assert reaction_payload["reactions"][0]["emoji"] == "❤️"
     assert reaction_payload["reactions"][0]["count"] == 1
 
-    upload_csrf = csrf_from(response)
+    latest_message_id = int(reply_message["id"])
+    for index in range(55):
+        socket_client.emit("send_message", {"body": f"History message {index}"})
+        received = socket_client.get_received()
+        event = next(item for item in received if item["name"] == "new_message")
+        latest_message_id = int(event["args"][0]["id"])
+
+    response = client.get(f"/api/messages/history?before_id={latest_message_id}&limit=20")
+    assert response.status_code == 200
+    history = response.get_json()
+    assert len(history["messages"]) == 20
+    assert history["has_more"] is True
+    assert all(int(message["id"]) < latest_message_id for message in history["messages"])
+
+    upload_csrf = csrf_from(client.get("/chat"))
     response = client.post(
         "/api/messages/upload",
         headers={"X-CSRF-Token": upload_csrf},
@@ -126,7 +142,7 @@ def main() -> None:
     response = client.get("/health")
     assert response.json == {"status": "ok"}
     socket_client.disconnect()
-    print("PASS: login, text, replies, reactions, picture upload, media download, and health route work.")
+    print("PASS: login, permanent history paging, replies, reactions, uploads, and health route work.")
 
 
 if __name__ == "__main__":

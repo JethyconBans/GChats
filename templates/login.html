@@ -3,9 +3,10 @@
 {% block body %}
 <main class="auth-shell">
     <section class="auth-card">
-        <div class="brand-mark">KF</div>
+        <div class="auth-logo">⚡</div>
+        <p class="auth-kicker">Kulot Friends</p>
         <h1>Welcome back</h1>
-        <p class="muted">Log in to continue your shared friends conversation.</p>
+        <p class="muted">Log in once and keep “Stay signed in” checked. The site will remember your secure login cookie, not your plain password.</p>
 
         {% with messages = get_flashed_messages(with_categories=true) %}
             {% for category, message in messages %}
@@ -17,14 +18,19 @@
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <label>
                 Username
-                <input name="username" autocomplete="username" required maxlength="24">
+                <input name="username" autocomplete="username" required maxlength="24" autofocus>
             </label>
             <label>
                 Password
                 <input type="password" name="password" autocomplete="current-password" required>
             </label>
-            <button class="button button-primary" type="submit">Log in</button>
+            <label class="remember-row">
+                <input type="checkbox" name="remember_me" checked>
+                <span>Stay signed in on this device</span>
+            </label>
+            <button class="button button-primary button-wide" type="submit">Continue</button>
         </form>
+        <p class="auth-note">Do not use “Stay signed in” on a shared phone or computer.</p>
         <p class="auth-link">No account yet? <a href="{{ url_for('register') }}">Register with an invite</a></p>
     </section>
 </main>

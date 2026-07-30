@@ -9,3 +9,5 @@ instance/*.db-wal
 .pytest_cache/
 .vscode/
 .idea/
+
+instance/uploads/

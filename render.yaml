@@ -17,3 +17,5 @@ services:
         value: "true"
       - key: REMEMBER_DAYS
         value: "90"
+      - key: HISTORY_PAGE_SIZE
+        value: "50"

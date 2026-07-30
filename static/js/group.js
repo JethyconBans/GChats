@@ -5,6 +5,7 @@
     const socket = io({ transports: ["websocket", "polling"] });
 
     const messagesElement = document.getElementById("messages");
+    const historyStatus = document.getElementById("history-status");
     const messageForm = document.getElementById("message-form");
     const messageInput = document.getElementById("message-input");
     const chatError = document.getElementById("chat-error");
@@ -81,6 +82,12 @@
     let unreadMessageCount = 0;
     let activeUserSearch = "";
     let replyingTo = null;
+    const historyPageSize = Math.max(20, Number(appData.historyPageSize) || 50);
+    let historyLoading = false;
+    let historyHasMore = Array.isArray(appData.messages) && appData.messages.length >= historyPageSize;
+    let oldestMessageId = Array.isArray(appData.messages) && appData.messages.length
+        ? Math.min(...appData.messages.map((message) => Number(message.id)).filter(Number.isFinite))
+        : null;
     const normalPageTitle = document.title;
 
     currentUsername.textContent = appData.username;
@@ -304,7 +311,9 @@
         return tools;
     }
 
-    function appendMessage(message) {
+    function appendMessage(message, options = {}) {
+        const prepend = Boolean(options.prepend);
+        const shouldScroll = options.scroll !== false;
         document.getElementById("empty-state")?.remove();
 
         const messageId = Number(message.id);
@@ -397,15 +406,78 @@
 
         content.append(body, createMessageTools(message));
         article.append(avatar, content);
-        messagesElement.appendChild(article);
+        if (prepend) {
+            messagesElement.prepend(article);
+        } else {
+            messagesElement.appendChild(article);
+        }
         renderReactionSummary(article, message);
-        messagesElement.scrollTop = messagesElement.scrollHeight;
+        if (shouldScroll) {
+            messagesElement.scrollTop = messagesElement.scrollHeight;
+        }
     }
 
-    function jumpToMessage(messageId) {
-        const target = document.getElementById(`message-${messageId}`);
+    function setHistoryStatus(text = "", visible = false) {
+        if (!historyStatus) return;
+        historyStatus.textContent = text;
+        historyStatus.classList.toggle("hidden", !visible);
+    }
+
+    async function loadOlderMessages() {
+        if (historyLoading || !historyHasMore || !oldestMessageId) return false;
+
+        historyLoading = true;
+        setHistoryStatus("Loading older messages…", true);
+        const previousHeight = messagesElement.scrollHeight;
+        const previousTop = messagesElement.scrollTop;
+
+        try {
+            const response = await fetch(
+                `/api/messages/history?before_id=${encodeURIComponent(oldestMessageId)}&limit=${historyPageSize}`,
+                { headers: { Accept: "application/json" } }
+            );
+            const payload = await response.json();
+            if (!response.ok) {
+                throw new Error(payload.error || "Could not load older messages.");
+            }
+
+            const olderMessages = Array.isArray(payload.messages) ? payload.messages : [];
+            olderMessages.slice().reverse().forEach((message) => {
+                appendMessage(message, { prepend: true, scroll: false });
+            });
+
+            if (olderMessages.length) {
+                oldestMessageId = Math.min(
+                    oldestMessageId,
+                    ...olderMessages.map((message) => Number(message.id)).filter(Number.isFinite)
+                );
+                const addedHeight = messagesElement.scrollHeight - previousHeight;
+                messagesElement.scrollTop = previousTop + addedHeight;
+            }
+
+            historyHasMore = Boolean(payload.has_more);
+            setHistoryStatus(historyHasMore ? "Scroll up for older messages" : "Beginning of conversation", true);
+            window.setTimeout(() => setHistoryStatus("", false), 1500);
+            return olderMessages.length > 0;
+        } catch (error) {
+            console.error("History loading failed:", error);
+            chatError.textContent = error.message || "Could not load older messages.";
+            setHistoryStatus("Could not load older messages", true);
+            return false;
+        } finally {
+            historyLoading = false;
+        }
+    }
+
+    async function jumpToMessage(messageId) {
+        let target = document.getElementById(`message-${messageId}`);
+        while (!target && historyHasMore) {
+            const loaded = await loadOlderMessages();
+            if (!loaded) break;
+            target = document.getElementById(`message-${messageId}`);
+        }
         if (!target) {
-            chatError.textContent = "The replied message is outside the loaded history.";
+            chatError.textContent = "The original message could not be found.";
             return;
         }
         target.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -416,8 +488,9 @@
     }
 
 
-    appData.messages.forEach(appendMessage);
+    appData.messages.forEach((message) => appendMessage(message, { scroll: false }));
     renderEmptyState();
+    messagesElement.scrollTop = messagesElement.scrollHeight;
     bindUserSearch(desktopUserSearch);
     bindUserSearch(mobileUserSearch);
 
@@ -592,6 +665,12 @@
 
     cancelReplyButton.addEventListener("click", clearReply);
 
+    messagesElement.addEventListener("scroll", () => {
+        if (messagesElement.scrollTop <= 80) {
+            void loadOlderMessages();
+        }
+    });
+
     messagesElement.addEventListener("click", (event) => {
         const button = event.target.closest("button");
         if (!button) return;
@@ -628,7 +707,7 @@
         }
 
         if (action === "jump-to-message") {
-            jumpToMessage(Number(button.dataset.targetMessageId || 0));
+            void jumpToMessage(Number(button.dataset.targetMessageId || 0));
         }
     });
 

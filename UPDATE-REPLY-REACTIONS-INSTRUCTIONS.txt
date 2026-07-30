@@ -1,0 +1,35 @@
+KULOT FRIENDS - REPLY, REACTIONS, AND EMOJI UPDATE
+
+New features:
+- Reply to any text, picture, or video message
+- Tap a replied-message preview to jump to the original
+- Messenger-style reactions: 👍 ❤️ 😂 😮 😢 😡 🎉
+- Emoji picker inside the message box
+- Reactions and replies saved in SQLite
+
+COPY/REPLACE THESE FILES IN YOUR CURRENT PROJECT:
+- app.py
+- smoke_test.py
+- templates/group.html
+- static/js/group.js
+- static/css/style.css
+
+Do not delete:
+- .env
+- instance/friends.db
+- instance/uploads
+
+TEST IN POWERSHELL:
+cd C:\PY_project\kulot-friends-chat
+.\venv\Scripts\Activate.ps1
+python smoke_test.py
+python app.py
+
+Open http://127.0.0.1:5000 and press Ctrl+F5.
+
+UPLOAD TO GITHUB AND RENDER:
+git add app.py smoke_test.py templates/group.html static/js/group.js static/css/style.css
+git commit -m "Add replies reactions and emoji picker"
+git push origin main
+
+Render should deploy automatically. Wait for Deploy live, then refresh the public website.

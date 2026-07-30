@@ -1,0 +1,51 @@
+KULOT FRIENDS - PERMANENT CONVERSATIONS UPDATE
+
+WHAT THIS UPDATE FIXES
+- Text messages, replies, and reactions stay in PostgreSQL.
+- The chat initially loads the newest 50 messages.
+- Scrolling to the top automatically loads older messages, like Messenger.
+- Pictures and videos can be stored permanently in Cloudinary when CLOUDINARY_URL is configured.
+- Local development still works with SQLite and local uploads.
+
+IMPORTANT
+- DATABASE_URL must be set in Render. Without it, Render uses a temporary SQLite file.
+- CLOUDINARY_URL must be set in Render if you want pictures and videos to remain after redeploys.
+- Messages that were already deleted from an old temporary Render database cannot be recovered by this update.
+
+INSTALL
+1. Copy the files from this update into C:\PY_project\kulot-friends-chat and replace existing files.
+2. Keep your .env and instance\friends.db files.
+3. In PowerShell:
+
+   cd C:\PY_project\kulot-friends-chat
+   .\venv\Scripts\Activate.ps1
+   python -m pip install -r requirements.txt
+   python smoke_test.py
+   python app.py
+
+4. Open http://127.0.0.1:5000 and test scrolling upward.
+
+RENDER ENVIRONMENT
+Required:
+- DATABASE_URL = your Neon/PostgreSQL connection string
+
+Required for permanent pictures/videos:
+- CLOUDINARY_URL = your Cloudinary environment URL
+
+Optional:
+- HISTORY_PAGE_SIZE = 50
+
+After adding environment variables, choose Save, rebuild, and deploy.
+
+UPLOAD TO GITHUB
+   git add .
+   git commit -m "Keep all conversations and media permanent"
+   git push origin main
+
+Wait for Render to show Deploy live, then refresh the website with Ctrl+F5.
+
+VERIFY
+Run locally or in the Render shell:
+   python check_database.py
+
+It will show which database and media-storage systems are active.

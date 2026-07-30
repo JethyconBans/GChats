@@ -16,6 +16,8 @@ from typing import Any, Callable, TypeVar
 import psycopg
 from psycopg.rows import dict_row
 
+import cloudinary
+import cloudinary.uploader
 from dotenv import load_dotenv
 from flask import (
     Flask,
@@ -45,6 +47,11 @@ if not USE_POSTGRES:
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", str(BASE_DIR / "instance" / "uploads")))
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 MAX_UPLOAD_MB = max(1, int(os.getenv("MAX_UPLOAD_MB", "25")))
+HISTORY_PAGE_SIZE = max(20, min(100, int(os.getenv("HISTORY_PAGE_SIZE", "50"))))
+CLOUDINARY_URL = os.getenv("CLOUDINARY_URL", "").strip()
+USE_CLOUDINARY = bool(CLOUDINARY_URL)
+if USE_CLOUDINARY:
+    cloudinary.config(secure=True)
 
 GROUP_ROOM = "friends-group"
 CALL_ROOM = "friends-call"
@@ -319,10 +326,18 @@ def reply_preview_from_row(row: DbRow) -> dict[str, Any] | None:
     }
 
 
-def recent_messages(limit: int = 100) -> list[dict[str, Any]]:
+def messages_before(
+    before_id: int | None = None,
+    limit: int = HISTORY_PAGE_SIZE,
+) -> list[dict[str, Any]]:
+    safe_limit = max(1, min(100, int(limit)))
+    where_clause = "WHERE messages.id < ?" if before_id else ""
+    params: tuple[Any, ...] = (before_id, safe_limit) if before_id else (safe_limit,)
+
     with db_connect() as db:
-        rows = db_execute(db, 
-            """
+        rows = db_execute(
+            db,
+            f"""
             SELECT messages.id, users.username, messages.body, messages.sent_at,
                    messages.message_type, messages.attachment_url,
                    messages.attachment_name, messages.attachment_mime,
@@ -333,10 +348,11 @@ def recent_messages(limit: int = 100) -> list[dict[str, Any]]:
             JOIN users ON users.id = messages.user_id
             LEFT JOIN messages AS replied ON replied.id = messages.reply_to_id
             LEFT JOIN users AS reply_users ON reply_users.id = replied.user_id
+            {where_clause}
             ORDER BY messages.id DESC
             LIMIT ?
             """,
-            (limit,),
+            params,
         ).fetchall()
 
     ordered = list(reversed(rows))
@@ -356,6 +372,18 @@ def recent_messages(limit: int = 100) -> list[dict[str, Any]]:
         )
         for row in ordered
     ]
+
+
+def has_messages_before(message_id: int | None) -> bool:
+    if not message_id:
+        return False
+    with db_connect() as db:
+        row = db_execute(
+            db,
+            "SELECT 1 AS found FROM messages WHERE id < ? LIMIT 1",
+            (message_id,),
+        ).fetchone()
+    return bool(row)
 
 
 def public_ice_servers() -> list[dict[str, Any]]:
@@ -591,7 +619,8 @@ def chat() -> Any:
     app_data = {
         "username": user["username"],
         "members": all_members(),
-        "messages": recent_messages(),
+        "messages": messages_before(limit=HISTORY_PAGE_SIZE),
+        "historyPageSize": HISTORY_PAGE_SIZE,
         "iceServers": public_ice_servers(),
         "csrfToken": csrf_token(),
         "maxUploadMb": MAX_UPLOAD_MB,
@@ -604,6 +633,29 @@ def chat() -> Any:
 def group() -> Any:
     # Keep old links working, but the application now opens the chat directly.
     return redirect(url_for("chat"))
+
+
+@app.get("/api/messages/history")
+@login_required
+def message_history() -> Any:
+    before_id = parse_message_id(request.args.get("before_id"))
+    if not before_id:
+        return jsonify({"error": "A valid before_id is required."}), 400
+
+    try:
+        requested_limit = int(request.args.get("limit", HISTORY_PAGE_SIZE))
+    except (TypeError, ValueError):
+        requested_limit = HISTORY_PAGE_SIZE
+    limit = max(1, min(100, requested_limit))
+
+    messages = messages_before(before_id=before_id, limit=limit)
+    oldest_id = int(messages[0]["id"]) if messages else before_id
+    return jsonify(
+        {
+            "messages": messages,
+            "has_more": has_messages_before(oldest_id),
+        }
+    )
 
 
 @app.post("/api/messages/upload")
@@ -631,17 +683,33 @@ def upload_message() -> Any:
         return jsonify({"error": "Only JPG, PNG, GIF, WEBP, MP4, WEBM, OGG, MOV, and M4V files are allowed."}), 400
 
     message_type, extension = classification
-    stored_name = f"{uuid.uuid4().hex}{extension}"
-    destination = UPLOAD_DIR / stored_name
-    uploaded.save(destination)
 
     body = request.form.get("caption", "").strip()
     reply_to_id = parse_message_id(request.form.get("reply_to_id"))
     if len(body) > 1000:
-        destination.unlink(missing_ok=True)
         return jsonify({"error": "Captions are limited to 1,000 characters."}), 400
 
-    attachment_url = url_for("uploaded_file", filename=stored_name)
+    attachment_url: str
+    if USE_CLOUDINARY:
+        try:
+            result = cloudinary.uploader.upload(
+                uploaded.stream,
+                resource_type="video" if message_type == "video" else "image",
+                folder="kulot-friends-chat",
+                public_id=uuid.uuid4().hex,
+                overwrite=False,
+            )
+            attachment_url = str(result.get("secure_url") or "")
+            if not attachment_url:
+                raise RuntimeError("Cloud media storage did not return a secure URL.")
+        except Exception as exc:
+            app.logger.exception("Cloudinary upload failed")
+            return jsonify({"error": f"Cloud upload failed: {exc}"}), 502
+    else:
+        stored_name = f"{uuid.uuid4().hex}{extension}"
+        destination = UPLOAD_DIR / stored_name
+        uploaded.save(destination)
+        attachment_url = url_for("uploaded_file", filename=stored_name)
     payload = save_message(
         int(user["id"]),
         str(user["username"]),
