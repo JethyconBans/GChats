@@ -18,6 +18,7 @@ from flask import (
     flash,
     redirect,
     render_template,
+    send_from_directory,
     request,
     session,
     url_for,
@@ -171,6 +172,16 @@ def public_ice_servers() -> list[dict[str, Any]]:
             app.logger.warning("ICE_SERVERS_JSON is invalid JSON; using default STUN.")
     return [{"urls": "stun:stun.l.google.com:19302"}]
 
+
+@app.get("/sw.js")
+def service_worker():
+    response = send_from_directory(
+        str(BASE_DIR / "static"),
+        "sw.js",
+    )
+    response.headers["Cache-Control"] = "no-cache"
+    response.headers["Service-Worker-Allowed"] = "/"
+    return response
 
 @app.route("/")
 def index() -> Any:

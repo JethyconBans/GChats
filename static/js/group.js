@@ -12,6 +12,7 @@
     const memberCount = document.getElementById("member-count");
     const onlineCount = document.getElementById("online-count");
     const currentUsername = document.getElementById("current-username");
+    const notificationButton = document.getElementById("notification-button");
 
     const activeCallBanner = document.getElementById("active-call-banner");
     const activeCallTitle = document.getElementById("active-call-title");
@@ -38,6 +39,7 @@
     const peerConnections = new Map();
     const peerNames = new Map();
     const pendingIce = new Map();
+    const normalPageTitle = document.title;
     let allMembers = Array.isArray(appData.members) ? appData.members : [];
 
     let onlineNames = new Set();
@@ -45,6 +47,8 @@
     let inCall = false;
     let currentCallMode = null;
     let activeCall = null;
+    let notificationRegistration = null;
+    let unreadMessageCount = 0;
 
     currentUsername.textContent = appData.username;
 
@@ -69,6 +73,166 @@
             messagesElement.appendChild(empty);
         }
     }
+
+    function updateNotificationButton() {
+    if (!notificationButton) return;
+
+    if (Notification.permission === "granted") {
+        notificationButton.textContent = "🔔";
+        notificationButton.title = "Message notifications enabled";
+        notificationButton.setAttribute(
+            "aria-label",
+            "Message notifications enabled"
+        );
+    } else if (Notification.permission === "denied") {
+        notificationButton.textContent = "🔕";
+        notificationButton.title = "Notifications are blocked";
+        notificationButton.setAttribute(
+            "aria-label",
+            "Notifications are blocked"
+        );
+    } else {
+        notificationButton.textContent = "🔔";
+        notificationButton.title = "Enable message notifications";
+        notificationButton.setAttribute(
+            "aria-label",
+            "Enable message notifications"
+        );
+    }
+}
+
+async function registerNotificationWorker() {
+    if (
+        !("Notification" in window) ||
+        !("serviceWorker" in navigator)
+    ) {
+        if (notificationButton) {
+            notificationButton.hidden = true;
+        }
+
+        return;
+    }
+
+    try {
+        notificationRegistration =
+            await navigator.serviceWorker.register("/sw.js", {
+                scope: "/",
+            });
+    } catch (error) {
+        console.error("Service worker registration failed:", error);
+    }
+
+    updateNotificationButton();
+}
+
+async function enableNotifications() {
+    if (!("Notification" in window)) {
+        alert("This browser does not support notifications.");
+        return;
+    }
+
+    if (Notification.permission === "denied") {
+        alert(
+            "Notifications are blocked. Open your browser's site settings and allow notifications for this website."
+        );
+        return;
+    }
+
+    try {
+        const permission = await Notification.requestPermission();
+
+        updateNotificationButton();
+
+        if (permission !== "granted") {
+            return;
+        }
+
+        if (!notificationRegistration) {
+            notificationRegistration =
+                await navigator.serviceWorker.register("/sw.js", {
+                    scope: "/",
+                });
+        }
+
+        await notificationRegistration.showNotification(
+            "Kulot Friends",
+            {
+                body: "Message notifications are now enabled.",
+                tag: "notifications-enabled",
+                data: {
+                    url: "/chat",
+                },
+            }
+        );
+    } catch (error) {
+        console.error("Could not enable notifications:", error);
+    }
+}
+
+async function showMessageNotification(message) {
+    if (message.username === appData.username) {
+        return;
+    }
+
+    if (
+        document.visibilityState === "visible" &&
+        document.hasFocus()
+    ) {
+        return;
+    }
+
+    if (Notification.permission !== "granted") {
+        return;
+    }
+
+    const registration =
+        notificationRegistration ||
+        await navigator.serviceWorker.ready;
+
+    const fullMessage = String(message.body || "");
+    const preview =
+        fullMessage.length > 120
+            ? `${fullMessage.slice(0, 117)}...`
+            : fullMessage;
+
+    await registration.showNotification(
+        `${message.username} sent a message`,
+        {
+            body: preview,
+            tag: `message-${message.id}`,
+            data: {
+                url: "/chat",
+            },
+            vibrate: [200, 100, 200],
+        }
+    );
+}
+
+function updateUnreadTitle() {
+    document.title =
+        unreadMessageCount > 0
+            ? `(${unreadMessageCount}) ${normalPageTitle}`
+            : normalPageTitle;
+}
+
+document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) {
+        unreadMessageCount = 0;
+        updateUnreadTitle();
+    }
+});
+
+window.addEventListener("focus", () => {
+    unreadMessageCount = 0;
+    updateUnreadTitle();
+});
+
+notificationButton?.addEventListener(
+    "click",
+    enableNotifications
+);
+
+registerNotificationWorker();
 
     function appendMessage(message) {
         document.getElementById("empty-state")?.remove();
@@ -130,10 +294,26 @@
         messageInput.focus();
     });
 
-    socket.on("new_message", appendMessage);
-    socket.on("chat_error", (payload) => {
-        chatError.textContent = payload?.message || "Could not send the message.";
-    });
+socket.on("new_message", (message) => {
+    appendMessage(message);
+
+    if (
+        message.username !== appData.username &&
+        (document.hidden || !document.hasFocus())
+    ) {
+        unreadMessageCount += 1;
+        updateUnreadTitle();
+
+        showMessageNotification(message).catch((error) => {
+            console.error("Notification failed:", error);
+        });
+    }
+});
+
+socket.on("chat_error", (payload) => {
+    chatError.textContent =
+        payload?.message || "Could not send the message.";
+});
 
     function renderMembers() {
         memberList.replaceChildren();

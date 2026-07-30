@@ -1,98 +1,180 @@
-{% extends "base.html" %}
-{% block title %}Kulot Friends{% endblock %}
-{% block body %}
+{% extends "base.html" %} {% block title %}Kulot Friends{% endblock %} {% block
+body %}
 <div class="app-shell messenger-shell">
-    <aside class="sidebar">
-        <div class="group-header">
-            <div class="brand-mark small">KF</div>
-            <div>
-                <strong>Kulot Friends</strong>
-                <span>Invite-only group chat</span>
-            </div>
+  <aside class="sidebar">
+    <div class="group-header">
+      <div class="brand-mark small">KF</div>
+      <div>
+        <strong>Kulot Friends</strong>
+        <span>Invite-only group chat</span>
+      </div>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="section-title">
+        Members — <span id="member-count">0</span>
+      </div>
+      <ul id="member-list" class="member-list"></ul>
+    </div>
+
+    <div class="sidebar-bottom">
+      <div class="current-user">
+        <span class="status-dot"></span>
+        <span id="current-username"></span>
+      </div>
+      <form method="post" action="{{ url_for('logout') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+        <button
+          class="icon-button"
+          type="submit"
+          title="Log out"
+          aria-label="Log out"
+        >
+          ↪
+        </button>
+      </form>
+    </div>
+  </aside>
+
+  <main class="main-panel">
+    <header class="topbar messenger-topbar">
+      <div class="conversation-title">
+        <div class="conversation-avatar">KF</div>
+        <div>
+          <h1>Kulot Friends</h1>
+          <p><span id="online-count">0</span> online</p>
         </div>
+      </div>
+      <div class="call-actions">
+        <button
+          id="notification-button"
+          class="round-call-button"
+          type="button"
+          title="Enable message notifications"
+          aria-label="Enable message notifications"
+        >
+          🔔
+        </button>
+        <button
+          id="voice-call-button"
+          class="round-call-button"
+          type="button"
+          title="Start group voice call"
+          aria-label="Start group voice call"
+        >
+          ☎
+        </button>
+        <button
+          id="video-call-button"
+          class="round-call-button"
+          type="button"
+          title="Start group video call"
+          aria-label="Start group video call"
+        >
+          📹
+        </button>
+      </div>
+    </header>
 
-        <div class="sidebar-section">
-            <div class="section-title">Members — <span id="member-count">0</span></div>
-            <ul id="member-list" class="member-list"></ul>
-        </div>
+    {% with messages = get_flashed_messages(with_categories=true) %} {% for
+    category, message in messages %}
+    <div class="alert alert-{{ category }} chat-alert">{{ message }}</div>
+    {% endfor %} {% endwith %}
 
-        <div class="sidebar-bottom">
-            <div class="current-user">
-                <span class="status-dot"></span>
-                <span id="current-username"></span>
-            </div>
-            <form method="post" action="{{ url_for('logout') }}">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                <button class="icon-button" type="submit" title="Log out" aria-label="Log out">↪</button>
-            </form>
-        </div>
-    </aside>
+    <section
+      id="active-call-banner"
+      class="active-call-banner hidden"
+      aria-live="polite"
+    >
+      <div>
+        <strong id="active-call-title">Group call active</strong>
+        <span id="active-call-details"></span>
+      </div>
+      <button
+        id="join-active-call-button"
+        class="button button-primary"
+        type="button"
+      >
+        Join call
+      </button>
+    </section>
 
-    <main class="main-panel">
-        <header class="topbar messenger-topbar">
-            <div class="conversation-title">
-                <div class="conversation-avatar">KF</div>
-                <div>
-                    <h1>Kulot Friends</h1>
-                    <p><span id="online-count">0</span> online</p>
-                </div>
-            </div>
-            <div class="call-actions">
-                <button id="voice-call-button" class="round-call-button" type="button" title="Start group voice call" aria-label="Start group voice call">☎</button>
-                <button id="video-call-button" class="round-call-button" type="button" title="Start group video call" aria-label="Start group video call">📹</button>
-            </div>
-        </header>
+    <section id="call-panel" class="call-panel hidden" aria-label="Group call">
+      <div class="call-toolbar">
+        <strong id="call-heading">Group call</strong>
+        <span id="call-status">Connecting…</span>
+        <div class="toolbar-spacer"></div>
+        <button id="mute-button" class="button button-secondary" type="button">
+          Mute
+        </button>
+        <button
+          id="camera-button"
+          class="button button-secondary"
+          type="button"
+        >
+          Camera off
+        </button>
+        <button
+          id="leave-call-button"
+          class="button button-danger"
+          type="button"
+        >
+          Leave
+        </button>
+      </div>
+      <div id="video-grid" class="video-grid"></div>
+    </section>
 
-        {% with messages = get_flashed_messages(with_categories=true) %}
-            {% for category, message in messages %}
-                <div class="alert alert-{{ category }} chat-alert">{{ message }}</div>
-            {% endfor %}
-        {% endwith %}
+    <section id="messages" class="messages" aria-live="polite"></section>
 
-        <section id="active-call-banner" class="active-call-banner hidden" aria-live="polite">
-            <div>
-                <strong id="active-call-title">Group call active</strong>
-                <span id="active-call-details"></span>
-            </div>
-            <button id="join-active-call-button" class="button button-primary" type="button">Join call</button>
-        </section>
-
-        <section id="call-panel" class="call-panel hidden" aria-label="Group call">
-            <div class="call-toolbar">
-                <strong id="call-heading">Group call</strong>
-                <span id="call-status">Connecting…</span>
-                <div class="toolbar-spacer"></div>
-                <button id="mute-button" class="button button-secondary" type="button">Mute</button>
-                <button id="camera-button" class="button button-secondary" type="button">Camera off</button>
-                <button id="leave-call-button" class="button button-danger" type="button">Leave</button>
-            </div>
-            <div id="video-grid" class="video-grid"></div>
-        </section>
-
-        <section id="messages" class="messages" aria-live="polite"></section>
-
-        <form id="message-form" class="message-composer">
-            <textarea id="message-input" rows="1" maxlength="1000" placeholder="Message Kulot Friends" required></textarea>
-            <button class="send-button" type="submit" aria-label="Send message">➤</button>
-        </form>
-        <div id="chat-error" class="chat-error" role="alert"></div>
-    </main>
+    <form id="message-form" class="message-composer">
+      <textarea
+        id="message-input"
+        rows="1"
+        maxlength="1000"
+        placeholder="Message Kulot Friends"
+        required
+      ></textarea>
+      <button class="send-button" type="submit" aria-label="Send message">
+        ➤
+      </button>
+    </form>
+    <div id="chat-error" class="chat-error" role="alert"></div>
+  </main>
 </div>
 
-<div id="incoming-call" class="incoming-call hidden" role="dialog" aria-modal="true" aria-labelledby="incoming-call-title">
-    <div class="incoming-call-card">
-        <div id="incoming-call-icon" class="incoming-call-icon">☎</div>
-        <h2 id="incoming-call-title">Incoming group call</h2>
-        <p id="incoming-call-text">A friend started a call.</p>
-        <div class="incoming-call-actions">
-            <button id="decline-call-button" class="incoming-action decline" type="button">✕<span>Decline</span></button>
-            <button id="accept-call-button" class="incoming-action accept" type="button">✓<span>Accept</span></button>
-        </div>
+<div
+  id="incoming-call"
+  class="incoming-call hidden"
+  role="dialog"
+  aria-modal="true"
+  aria-labelledby="incoming-call-title"
+>
+  <div class="incoming-call-card">
+    <div id="incoming-call-icon" class="incoming-call-icon">☎</div>
+    <h2 id="incoming-call-title">Incoming group call</h2>
+    <p id="incoming-call-text">A friend started a call.</p>
+    <div class="incoming-call-actions">
+      <button
+        id="decline-call-button"
+        class="incoming-action decline"
+        type="button"
+      >
+        ✕<span>Decline</span>
+      </button>
+      <button
+        id="accept-call-button"
+        class="incoming-action accept"
+        type="button"
+      >
+        ✓<span>Accept</span>
+      </button>
     </div>
+  </div>
 </div>
 
 <script>
-    window.APP_DATA = {{ app_data | tojson }};
+  window.APP_DATA = {{ app_data | tojson }};
 </script>
 <script src="https://cdn.socket.io/4.8.1/socket.io.min.js"></script>
 <script src="{{ url_for('static', filename='js/group.js') }}"></script>
