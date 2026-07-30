@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Register · Kulot Friends{% endblock %}
+{% block body %}
+<main class="auth-shell">
+    <section class="auth-card">
+        <div class="brand-mark">KF</div>
+        <h1>Join Kulot Friends</h1>
+        <p class="muted">Register once and you will open the shared Messenger-style chat automatically.</p>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% for category, message in messages %}
+                <div class="alert alert-{{ category }}">{{ message }}</div>
+            {% endfor %}
+        {% endwith %}
+
+        <form method="post" class="auth-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <label>
+                Username
+                <input name="username" autocomplete="username" required minlength="3" maxlength="24" pattern="[A-Za-z0-9_]+">
+            </label>
+            <label>
+                Password
+                <input type="password" name="password" autocomplete="new-password" required minlength="8">
+            </label>
+            <label>
+                Invite code
+                <input type="password" name="invite_code" required>
+            </label>
+            <button class="button button-primary" type="submit">Create account</button>
+        </form>
+        <p class="auth-link">Already registered? <a href="{{ url_for('login') }}">Log in</a></p>
+    </section>
+</main>
+{% endblock %}
