@@ -2,18 +2,23 @@
 
 from __future__ import annotations
 
+import io
 import os
+import shutil
 import tempfile
 from pathlib import Path
 
 TEST_DB = Path(tempfile.gettempdir()) / "kulot_friends_smoke_test.db"
 TEST_DB.unlink(missing_ok=True)
+TEST_UPLOAD_DIR = Path(tempfile.gettempdir()) / "kulot_friends_smoke_uploads"
+shutil.rmtree(TEST_UPLOAD_DIR, ignore_errors=True)
 
 os.environ["DATABASE_PATH"] = str(TEST_DB)
 os.environ["INVITE_CODE"] = "TEST-CODE"
 os.environ["SECRET_KEY"] = "test-secret-only"
+os.environ["UPLOAD_DIR"] = str(TEST_UPLOAD_DIR)
 
-from app import app  # noqa: E402
+from app import app, socketio  # noqa: E402
 
 
 def csrf_from(response) -> str:
@@ -65,9 +70,63 @@ def main() -> None:
     assert response.status_code == 200
     assert b"Message Kulot Friends" in response.data
 
+    socket_client = socketio.test_client(app, flask_test_client=client)
+    assert socket_client.is_connected()
+    socket_client.get_received()
+
+    socket_client.emit("send_message", {"body": "First message"})
+    received = socket_client.get_received()
+    first_event = next(item for item in received if item["name"] == "new_message")
+    first_message = first_event["args"][0]
+    assert first_message["body"] == "First message"
+    assert first_message["reply_to"] is None
+
+    socket_client.emit(
+        "send_message",
+        {"body": "This is a reply", "reply_to_id": first_message["id"]},
+    )
+    received = socket_client.get_received()
+    reply_event = next(item for item in received if item["name"] == "new_message")
+    reply_message = reply_event["args"][0]
+    assert reply_message["reply_to"]["id"] == first_message["id"]
+    assert reply_message["reply_to"]["body"] == "First message"
+
+    socket_client.emit(
+        "toggle_reaction",
+        {"message_id": first_message["id"], "emoji": "❤️"},
+    )
+    received = socket_client.get_received()
+    reaction_event = next(item for item in received if item["name"] == "reaction_updated")
+    reaction_payload = reaction_event["args"][0]
+    assert reaction_payload["message_id"] == first_message["id"]
+    assert reaction_payload["reactions"][0]["emoji"] == "❤️"
+    assert reaction_payload["reactions"][0]["count"] == 1
+
+    upload_csrf = csrf_from(response)
+    response = client.post(
+        "/api/messages/upload",
+        headers={"X-CSRF-Token": upload_csrf},
+        data={
+            "caption": "Test picture caption",
+            "reply_to_id": str(first_message["id"]),
+            "file": (io.BytesIO(b"fake image contents"), "test.png", "image/png"),
+        },
+        content_type="multipart/form-data",
+    )
+    assert response.status_code == 201, response.get_data(as_text=True)
+    uploaded_message = response.get_json()["message"]
+    assert uploaded_message["message_type"] == "image"
+    assert uploaded_message["body"] == "Test picture caption"
+    assert uploaded_message["attachment_url"].startswith("/uploads/")
+    assert uploaded_message["reply_to"]["id"] == first_message["id"]
+
+    response = client.get(uploaded_message["attachment_url"])
+    assert response.status_code == 200
+
     response = client.get("/health")
     assert response.json == {"status": "ok"}
-    print("PASS: auto-login registration, returning login, shared chat, and health route work.")
+    socket_client.disconnect()
+    print("PASS: login, text, replies, reactions, picture upload, media download, and health route work.")
 
 
 if __name__ == "__main__":
@@ -77,3 +136,4 @@ if __name__ == "__main__":
         TEST_DB.unlink(missing_ok=True)
         Path(f"{TEST_DB}-shm").unlink(missing_ok=True)
         Path(f"{TEST_DB}-wal").unlink(missing_ok=True)
+        shutil.rmtree(TEST_UPLOAD_DIR, ignore_errors=True)
