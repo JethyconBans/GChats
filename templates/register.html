@@ -1,37 +1,59 @@
-{% extends "base.html" %}
-{% block title %}Register · Kulot Friends{% endblock %}
-{% block body %}
+{% extends "base.html" %} {% block title %}Register · G-Chats{% endblock %} {%
+block body %}
 <main class="auth-shell">
-    <section class="auth-card">
-        <div class="auth-logo">⚡</div>
-        <p class="auth-kicker">Private Messenger</p>
-        <h1>Join Kulot Friends</h1>
-        <p class="muted">Register once with the private invite code. You will be signed in automatically and taken directly to the shared conversation.</p>
+  <section class="auth-card">
+    <div class="auth-logo">⚡</div>
+    <p class="auth-kicker">G-Chats</p>
+    <h1>Join G-Chats</h1>
+    <p class="muted">
+      Register once with the private invite code. You will be signed in
+      automatically and taken directly to the shared conversation.
+    </p>
 
-        {% with messages = get_flashed_messages(with_categories=true) %}
-            {% for category, message in messages %}
-                <div class="alert alert-{{ category }}">{{ message }}</div>
-            {% endfor %}
-        {% endwith %}
+    {% with messages = get_flashed_messages(with_categories=true) %} {% for
+    category, message in messages %}
+    <div class="alert alert-{{ category }}">{{ message }}</div>
+    {% endfor %} {% endwith %}
 
-        <form method="post" class="auth-form">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <label>
-                Username
-                <input name="username" autocomplete="username" required minlength="3" maxlength="24" pattern="[A-Za-z0-9_]+" autofocus>
-            </label>
-            <label>
-                Password
-                <input type="password" name="password" autocomplete="new-password" required minlength="8">
-            </label>
-            <label>
-                Invite code
-                <input type="password" name="invite_code" autocomplete="off" required>
-            </label>
-            <button class="button button-primary button-wide" type="submit">Create account</button>
-        </form>
-        <p class="auth-note">Passwords are stored as secure hashes. The website never saves the readable password.</p>
-        <p class="auth-link">Already registered? <a href="{{ url_for('login') }}">Log in</a></p>
-    </section>
+    <form method="post" class="auth-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+      <label>
+        Username
+        <input
+          name="username"
+          autocomplete="username"
+          required
+          minlength="3"
+          maxlength="24"
+          pattern="[A-Za-z0-9_]+"
+          autofocus
+        />
+      </label>
+      <label>
+        Password
+        <input
+          type="password"
+          name="password"
+          autocomplete="new-password"
+          required
+          minlength="8"
+        />
+      </label>
+      <label>
+        Invite code
+        <input type="password" name="invite_code" autocomplete="off" required />
+      </label>
+      <button class="button button-primary button-wide" type="submit">
+        Create account
+      </button>
+    </form>
+    <p class="auth-note">
+      Passwords are stored as secure hashes. The website never saves the
+      readable password.
+    </p>
+    <p class="auth-link">
+      Already registered? <a href="{{ url_for('login') }}">Log in</a>
+    </p>
+  </section>
 </main>
 {% endblock %}
