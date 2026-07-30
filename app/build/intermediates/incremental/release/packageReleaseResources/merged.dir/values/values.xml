@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string-array name="display_override">
+    
+      
+        <item>window-controls-overlay</item>
+      
+    
+      
+        <item>standalone</item>
+      
+    
+    </string-array>
+    <bool name="enableNotification">true</bool>
+    <bool name="enableSiteSettingsShortcut">true</bool>
+    <color name="backgroundColor">#0B141A</color>
+    <color name="colorPrimary">#0B141A</color>
+    <color name="colorPrimaryDark">#000000</color>
+    <color name="navigationColor">#000000</color>
+    <color name="navigationColorDark">#000000</color>
+    <color name="navigationDividerColor">#000000</color>
+    <color name="navigationDividerColorDark">#000000</color>
+    <color name="shortcut_background">#F5F5F5</color>
+    <integer name="splashScreenFadeOutDuration">300</integer>
+    <string name="appName" translatable="false">Gchats</string>
+    <string name="assetStatements">
+    [{
+        \"relation\": [\"delegate_permission/common.handle_all_urls\"],
+        \"target\": {
+            \"namespace\": \"web\",
+            \"site\": \"https://kulot-friends-chat.onrender.com\"
+        }
+    }]
+    
+  </string>
+    <string name="fallbackType" translatable="false">customtabs</string>
+    <string name="fullScopeUrl" translatable="false">https://kulot-friends-chat.onrender.com/</string>
+    <string name="generatorApp" translatable="false">bubblewrap-cli</string>
+    <string name="hostName" translatable="false">kulot-friends-chat.onrender.com</string>
+    <string name="launchUrl" translatable="false">https://kulot-friends-chat.onrender.com/chat</string>
+    <string name="launcherName" translatable="false">GC</string>
+    <string name="orientation" translatable="false">portrait-primary</string>
+    <string name="providerAuthority" translatable="false">com.onrender.kulot_friends_chat.twa.fileprovider</string>
+    <string name="webManifestUrl" translatable="false">https://kulot-friends-chat.onrender.com/static/manifest.webmanifest</string>
+</resources>

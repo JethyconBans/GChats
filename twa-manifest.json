@@ -1,0 +1,50 @@
+{
+  "packageId": "com.onrender.kulot_friends_chat.twa",
+  "host": "kulot-friends-chat.onrender.com",
+  "name": "Gchats",
+  "launcherName": "GC",
+  "display": "standalone",
+  "themeColor": "#0B141A",
+  "themeColorDark": "#000000",
+  "navigationColor": "#000000",
+  "navigationColorDark": "#000000",
+  "navigationDividerColor": "#000000",
+  "navigationDividerColorDark": "#000000",
+  "backgroundColor": "#0B141A",
+  "enableNotifications": true,
+  "startUrl": "/chat",
+  "iconUrl": "https://kulot-friends-chat.onrender.com/static/icon-512.png",
+  "maskableIconUrl": "https://kulot-friends-chat.onrender.com/static/icon-512.png",
+  "splashScreenFadeOutDuration": 300,
+  "signingKey": {
+    "path": "C:\\PY_project\\kulot-friends-chat\\android.keystore",
+    "alias": "android"
+  },
+  "appVersionName": "1",
+  "appVersionCode": 1,
+  "shortcuts": [],
+  "generatorApp": "bubblewrap-cli",
+  "webManifestUrl": "https://kulot-friends-chat.onrender.com/static/manifest.webmanifest",
+  "fallbackType": "customtabs",
+  "features": {},
+  "alphaDependencies": {
+    "enabled": false
+  },
+  "enableSiteSettingsShortcut": true,
+  "isChromeOSOnly": false,
+  "isMetaQuest": false,
+  "fullScopeUrl": "https://kulot-friends-chat.onrender.com/",
+  "minSdkVersion": 21,
+  "orientation": "portrait-primary",
+  "fingerprints": [],
+  "additionalTrustedOrigins": [],
+  "retainedBundles": [],
+  "protocolHandlers": [],
+  "fileHandlers": [],
+  "launchHandlerClientMode": "",
+  "displayOverride": [
+    "window-controls-overlay",
+    "standalone"
+  ],
+  "appVersion": "1"
+}
