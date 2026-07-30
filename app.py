@@ -37,6 +37,17 @@ from werkzeug.utils import secure_filename
 
 load_dotenv()
 
+
+def get_int_env(name: str, default: int) -> int:
+    value = os.getenv(name, "").strip()
+    if not value:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_DB = BASE_DIR / "instance" / "friends.db"
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
@@ -46,8 +57,12 @@ if not USE_POSTGRES:
     DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", str(BASE_DIR / "instance" / "uploads")))
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-MAX_UPLOAD_MB = max(1, int(os.getenv("MAX_UPLOAD_MB", "25")))
-HISTORY_PAGE_SIZE = max(20, min(100, int(os.getenv("HISTORY_PAGE_SIZE", "50"))))
+PROFILE_UPLOAD_DIR = UPLOAD_DIR / "profiles"
+PROFILE_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+MAX_UPLOAD_MB = max(1, get_int_env("MAX_UPLOAD_MB", 25))
+PROFILE_MAX_UPLOAD_MB = max(1, min(10, get_int_env("PROFILE_MAX_UPLOAD_MB", 5)))
+HISTORY_PAGE_SIZE = max(20, min(100, get_int_env("HISTORY_PAGE_SIZE", 50)))
+REMEMBER_DAYS = max(1, get_int_env("REMEMBER_DAYS", 90))
 CLOUDINARY_URL = os.getenv("CLOUDINARY_URL", "").strip()
 USE_CLOUDINARY = bool(CLOUDINARY_URL)
 if USE_CLOUDINARY:
@@ -66,7 +81,7 @@ app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
     SESSION_COOKIE_SECURE=os.getenv("COOKIE_SECURE", "false").lower() == "true",
-    PERMANENT_SESSION_LIFETIME=timedelta(days=int(os.getenv("REMEMBER_DAYS", "90"))),
+    PERMANENT_SESSION_LIFETIME=timedelta(days=REMEMBER_DAYS),
     SESSION_REFRESH_EACH_REQUEST=True,
     MAX_CONTENT_LENGTH=(MAX_UPLOAD_MB + 1) * 1024 * 1024,
 )
@@ -132,7 +147,11 @@ def init_sqlite_db() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 username TEXT NOT NULL UNIQUE COLLATE NOCASE,
                 password_hash TEXT NOT NULL,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                profile_picture_url TEXT,
+                profile_picture_public_id TEXT,
+                note_text TEXT,
+                note_expires_at TEXT
             );
 
             CREATE TABLE IF NOT EXISTS messages (
@@ -164,6 +183,20 @@ def init_sqlite_db() -> None:
             """
         )
 
+        existing_user_columns = {
+            str(row["name"])
+            for row in db.execute("PRAGMA table_info(users)").fetchall()
+        }
+        user_migrations = {
+            "profile_picture_url": "ALTER TABLE users ADD COLUMN profile_picture_url TEXT",
+            "profile_picture_public_id": "ALTER TABLE users ADD COLUMN profile_picture_public_id TEXT",
+            "note_text": "ALTER TABLE users ADD COLUMN note_text TEXT",
+            "note_expires_at": "ALTER TABLE users ADD COLUMN note_expires_at TEXT",
+        }
+        for column_name, statement in user_migrations.items():
+            if column_name not in existing_user_columns:
+                db.execute(statement)
+
         existing_columns = {
             str(row["name"])
             for row in db.execute("PRAGMA table_info(messages)").fetchall()
@@ -187,10 +220,18 @@ def init_postgres_db() -> None:
             id BIGSERIAL PRIMARY KEY,
             username VARCHAR(24) NOT NULL,
             password_hash TEXT NOT NULL,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            profile_picture_url TEXT,
+            profile_picture_public_id TEXT,
+            note_text TEXT,
+            note_expires_at TEXT
         )
         """,
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_lower ON users (LOWER(username))",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_picture_url TEXT",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_picture_public_id TEXT",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS note_text TEXT",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS note_expires_at TEXT",
         """
         CREATE TABLE IF NOT EXISTS messages (
             id BIGSERIAL PRIMARY KEY,
@@ -268,17 +309,49 @@ def current_user() -> DbRow | None:
     if not user_id:
         return None
     with db_connect() as db:
-        return db_execute(db, 
-            "SELECT id, username, created_at FROM users WHERE id = ?", (user_id,)
+        return db_execute(
+            db,
+            """
+            SELECT id, username, created_at, profile_picture_url,
+                   profile_picture_public_id, note_text, note_expires_at
+            FROM users WHERE id = ?
+            """,
+            (user_id,),
         ).fetchone()
 
 
-def all_members() -> list[str]:
+def note_is_active(expires_at: Any) -> bool:
+    if not expires_at:
+        return False
+    try:
+        parsed = datetime.fromisoformat(str(expires_at))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed > datetime.now(timezone.utc)
+    except (TypeError, ValueError):
+        return False
+
+
+def profile_payload(row: DbRow) -> dict[str, Any]:
+    active_note = str(row["note_text"] or "").strip() if note_is_active(row["note_expires_at"]) else ""
+    return {
+        "username": str(row["username"]),
+        "profile_picture_url": row["profile_picture_url"],
+        "note": active_note,
+        "note_expires_at": row["note_expires_at"] if active_note else None,
+    }
+
+
+def all_members() -> list[dict[str, Any]]:
     with db_connect() as db:
-        rows = db_execute(db, 
-            "SELECT username FROM users ORDER BY LOWER(username)"
+        rows = db_execute(
+            db,
+            """
+            SELECT username, profile_picture_url, note_text, note_expires_at
+            FROM users ORDER BY LOWER(username)
+            """,
         ).fetchall()
-    return [str(row["username"]) for row in rows]
+    return [profile_payload(row) for row in rows]
 
 
 def reaction_summaries(message_ids: list[int]) -> dict[int, list[dict[str, Any]]]:
@@ -338,7 +411,7 @@ def messages_before(
         rows = db_execute(
             db,
             f"""
-            SELECT messages.id, users.username, messages.body, messages.sent_at,
+            SELECT messages.id, users.username, users.profile_picture_url, messages.body, messages.sent_at,
                    messages.message_type, messages.attachment_url,
                    messages.attachment_name, messages.attachment_mime,
                    messages.reply_to_id, reply_users.username AS reply_username,
@@ -369,6 +442,7 @@ def messages_before(
             row["attachment_mime"],
             reply_to=reply_preview_from_row(row),
             reactions=summaries.get(int(row["id"]), []),
+            profile_picture_url=row["profile_picture_url"],
         )
         for row in ordered
     ]
@@ -415,6 +489,7 @@ def message_payload(
     attachment_mime: str | None = None,
     reply_to: dict[str, Any] | None = None,
     reactions: list[dict[str, Any]] | None = None,
+    profile_picture_url: str | None = None,
 ) -> dict[str, Any]:
     return {
         "id": message_id,
@@ -427,6 +502,7 @@ def message_payload(
         "attachment_mime": attachment_mime,
         "reply_to": reply_to,
         "reactions": reactions or [],
+        "profile_picture_url": profile_picture_url,
     }
 
 
@@ -465,6 +541,7 @@ def save_message(
     attachment_name: str | None = None,
     attachment_mime: str | None = None,
     reply_to_id: int | None = None,
+    profile_picture_url: str | None = None,
 ) -> dict[str, Any]:
     reply_to = get_reply_preview(reply_to_id)
     valid_reply_id = int(reply_to["id"]) if reply_to else None
@@ -501,6 +578,7 @@ def save_message(
         attachment_mime,
         reply_to=reply_to,
         reactions=[],
+        profile_picture_url=profile_picture_url,
     )
 
 
@@ -619,11 +697,13 @@ def chat() -> Any:
     app_data = {
         "username": user["username"],
         "members": all_members(),
+        "currentProfile": profile_payload(user),
         "messages": messages_before(limit=HISTORY_PAGE_SIZE),
         "historyPageSize": HISTORY_PAGE_SIZE,
         "iceServers": public_ice_servers(),
         "csrfToken": csrf_token(),
         "maxUploadMb": MAX_UPLOAD_MB,
+        "profileMaxUploadMb": PROFILE_MAX_UPLOAD_MB,
     }
     return render_template("group.html", app_data=app_data)
 
@@ -719,9 +799,172 @@ def upload_message() -> Any:
         attachment_name=original_name,
         attachment_mime=uploaded.mimetype or None,
         reply_to_id=reply_to_id,
+        profile_picture_url=user["profile_picture_url"],
     )
     socketio.emit("new_message", payload, to=GROUP_ROOM)
     return jsonify({"message": payload}), 201
+
+
+def valid_header_csrf() -> bool:
+    expected = session.get("_csrf_token", "")
+    received = request.headers.get("X-CSRF-Token", "")
+    return bool(expected and received and hmac.compare_digest(expected, received))
+
+
+def emit_profile_update(profile: dict[str, Any]) -> None:
+    socketio.emit("profile_updated", {"profile": profile}, to=GROUP_ROOM)
+
+
+@app.post("/api/profile/picture")
+@login_required
+def update_profile_picture() -> Any:
+    if not valid_header_csrf():
+        return jsonify({"error": "The profile session expired. Refresh the page and try again."}), 403
+
+    user = current_user()
+    if not user:
+        return jsonify({"error": "Please log in again."}), 401
+
+    uploaded = request.files.get("file")
+    if not uploaded or not uploaded.filename:
+        return jsonify({"error": "Choose a profile picture first."}), 400
+
+    original_name = secure_filename(uploaded.filename)
+    classification = classify_upload(original_name, uploaded.mimetype or "")
+    if not classification or classification[0] != "image":
+        return jsonify({"error": "Profile pictures must be JPG, PNG, GIF, or WEBP."}), 400
+
+    content_length = request.content_length or 0
+    if content_length > PROFILE_MAX_UPLOAD_MB * 1024 * 1024:
+        return jsonify({"error": f"Profile pictures are limited to {PROFILE_MAX_UPLOAD_MB} MB."}), 413
+
+    extension = classification[1]
+    old_url = str(user["profile_picture_url"] or "")
+    old_public_id = str(user["profile_picture_public_id"] or "")
+    new_public_id: str | None = None
+
+    if USE_CLOUDINARY:
+        try:
+            result = cloudinary.uploader.upload(
+                uploaded.stream,
+                resource_type="image",
+                folder="kulot-friends-chat/profiles",
+                public_id=f"user-{int(user['id'])}-{uuid.uuid4().hex}",
+                overwrite=False,
+                transformation=[
+                    {"width": 720, "height": 720, "crop": "limit", "quality": "auto"}
+                ],
+            )
+            picture_url = str(result.get("secure_url") or "")
+            new_public_id = str(result.get("public_id") or "") or None
+            if not picture_url:
+                raise RuntimeError("Cloud media storage did not return a secure URL.")
+        except Exception as exc:
+            app.logger.exception("Profile picture upload failed")
+            return jsonify({"error": f"Profile picture upload failed: {exc}"}), 502
+    else:
+        stored_name = f"profile-{int(user['id'])}-{uuid.uuid4().hex}{extension}"
+        destination = PROFILE_UPLOAD_DIR / stored_name
+        uploaded.save(destination)
+        picture_url = url_for("profile_uploaded_file", filename=stored_name)
+
+    with db_connect() as db:
+        db_execute(
+            db,
+            """
+            UPDATE users SET profile_picture_url = ?, profile_picture_public_id = ?
+            WHERE id = ?
+            """,
+            (picture_url, new_public_id, int(user["id"])),
+        )
+
+    if USE_CLOUDINARY and old_public_id and old_public_id != new_public_id:
+        try:
+            cloudinary.uploader.destroy(old_public_id, resource_type="image", invalidate=True)
+        except Exception:
+            app.logger.warning("Could not remove the old profile picture from Cloudinary.")
+    elif not USE_CLOUDINARY and old_url.startswith("/profile-uploads/"):
+        old_filename = old_url.rsplit("/", 1)[-1]
+        (PROFILE_UPLOAD_DIR / old_filename).unlink(missing_ok=True)
+
+    refreshed = current_user()
+    if not refreshed:
+        return jsonify({"error": "Could not reload the profile."}), 500
+    profile = profile_payload(refreshed)
+    emit_profile_update(profile)
+    return jsonify({"profile": profile}), 200
+
+
+@app.post("/api/profile/picture/remove")
+@login_required
+def remove_profile_picture() -> Any:
+    if not valid_header_csrf():
+        return jsonify({"error": "The profile session expired. Refresh the page and try again."}), 403
+
+    user = current_user()
+    if not user:
+        return jsonify({"error": "Please log in again."}), 401
+
+    old_url = str(user["profile_picture_url"] or "")
+    old_public_id = str(user["profile_picture_public_id"] or "")
+    with db_connect() as db:
+        db_execute(
+            db,
+            "UPDATE users SET profile_picture_url = NULL, profile_picture_public_id = NULL WHERE id = ?",
+            (int(user["id"]),),
+        )
+
+    if USE_CLOUDINARY and old_public_id:
+        try:
+            cloudinary.uploader.destroy(old_public_id, resource_type="image", invalidate=True)
+        except Exception:
+            app.logger.warning("Could not remove the profile picture from Cloudinary.")
+    elif old_url.startswith("/profile-uploads/"):
+        (PROFILE_UPLOAD_DIR / old_url.rsplit("/", 1)[-1]).unlink(missing_ok=True)
+
+    refreshed = current_user()
+    profile = profile_payload(refreshed) if refreshed else {"username": session.get("username", ""), "profile_picture_url": None, "note": "", "note_expires_at": None}
+    emit_profile_update(profile)
+    return jsonify({"profile": profile}), 200
+
+
+@app.post("/api/profile/note")
+@login_required
+def update_profile_note() -> Any:
+    if not valid_header_csrf():
+        return jsonify({"error": "The profile session expired. Refresh the page and try again."}), 403
+
+    user = current_user()
+    if not user:
+        return jsonify({"error": "Please log in again."}), 401
+
+    data = request.get_json(silent=True) or {}
+    note = str(data.get("note", "")).strip()
+    if len(note) > 60:
+        return jsonify({"error": "Notes are limited to 60 characters."}), 400
+
+    expires_at = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat() if note else None
+    with db_connect() as db:
+        db_execute(
+            db,
+            "UPDATE users SET note_text = ?, note_expires_at = ? WHERE id = ?",
+            (note or None, expires_at, int(user["id"])),
+        )
+
+    refreshed = current_user()
+    if not refreshed:
+        return jsonify({"error": "Could not reload the profile."}), 500
+    profile = profile_payload(refreshed)
+    emit_profile_update(profile)
+    return jsonify({"profile": profile}), 200
+
+
+@app.get("/profile-uploads/<path:filename>")
+@login_required
+def profile_uploaded_file(filename: str) -> Any:
+    response = send_from_directory(str(PROFILE_UPLOAD_DIR), filename)
+    response.headers["Cache-Control"] = "private, max-age=86400"
+    return response
 
 
 @app.get("/uploads/<path:filename>")
@@ -743,6 +986,8 @@ def service_worker() -> Any:
 @app.errorhandler(RequestEntityTooLarge)
 def upload_too_large(error: RequestEntityTooLarge) -> Any:
     del error
+    if request.path.startswith("/api/profile/picture"):
+        return jsonify({"error": f"The profile picture is too large. Maximum size is {PROFILE_MAX_UPLOAD_MB} MB."}), 413
     if request.path.startswith("/api/messages/upload"):
         return jsonify({"error": f"The file is too large. Maximum size is {MAX_UPLOAD_MB} MB."}), 413
     return "File too large", 413
@@ -874,8 +1119,8 @@ def handle_disconnect() -> None:
 @socketio.on("send_message")
 def handle_send_message(payload: Any) -> None:
     username = socket_username()
-    user_id = session.get("user_id")
-    if not username or not user_id:
+    user = current_user()
+    if not username or not user:
         return
 
     body = ""
@@ -890,7 +1135,7 @@ def handle_send_message(payload: Any) -> None:
         emit("chat_error", {"message": "Messages are limited to 1,000 characters."})
         return
 
-    payload = save_message(int(user_id), username, body, reply_to_id=reply_to_id)
+    payload = save_message(int(user["id"]), username, body, reply_to_id=reply_to_id, profile_picture_url=user["profile_picture_url"])
     socketio.emit("new_message", payload, to=GROUP_ROOM)
 
 

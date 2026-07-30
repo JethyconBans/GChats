@@ -1,0 +1,31 @@
+KULOT FRIENDS - PROFILE PICTURE AND MESSENGER-STYLE NOTES
+
+NEW FEATURES
+- Each user can upload or remove a profile picture.
+- Profile pictures appear in the member list, notes row, and chat messages.
+- Each user can share a short note of up to 60 characters.
+- Notes automatically disappear after 24 hours.
+- Profile and note changes update for all online friends immediately.
+- Existing PostgreSQL users/messages stay intact; the database adds new columns automatically.
+
+INSTALL
+1. Copy all files from this patch into your kulot-friends-chat project.
+2. Choose Replace when Windows asks.
+3. Do not delete .env or instance/friends.db.
+4. Run: python -m pip install -r requirements.txt
+5. Run: python smoke_test.py
+6. Run: python app.py
+7. Open /chat, then click your profile picture to edit it or share a note.
+
+PERMANENT CLOUD STORAGE
+- Notes and profile-picture URLs are permanent when DATABASE_URL points to Neon PostgreSQL.
+- Actual profile image files are permanent only when CLOUDINARY_URL is configured in Render.
+- Without CLOUDINARY_URL, local testing works, but profile pictures can disappear after a Render redeploy.
+
+OPTIONAL RENDER VARIABLE
+PROFILE_MAX_UPLOAD_MB=5
+
+UPDATE GITHUB
+  git add app.py smoke_test.py templates/group.html static/js/group.js static/css/style.css
+  git commit -m "Add profile pictures and Messenger notes"
+  git push origin main

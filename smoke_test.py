@@ -72,6 +72,28 @@ def main() -> None:
     assert response.status_code == 200
     assert b"Message Kulot Friends" in response.data
 
+    profile_csrf = csrf_from(response)
+    response = client.post(
+        "/api/profile/note",
+        headers={"X-CSRF-Token": profile_csrf},
+        json={"note": "Testing my note"},
+    )
+    assert response.status_code == 200, response.get_data(as_text=True)
+    assert response.get_json()["profile"]["note"] == "Testing my note"
+
+    response = client.post(
+        "/api/profile/picture",
+        headers={"X-CSRF-Token": profile_csrf},
+        data={
+            "file": (io.BytesIO(b"fake profile image"), "profile.png", "image/png"),
+        },
+        content_type="multipart/form-data",
+    )
+    assert response.status_code == 200, response.get_data(as_text=True)
+    profile_picture_url = response.get_json()["profile"]["profile_picture_url"]
+    assert profile_picture_url.startswith("/profile-uploads/")
+    assert client.get(profile_picture_url).status_code == 200
+
     socket_client = socketio.test_client(app, flask_test_client=client)
     assert socket_client.is_connected()
     socket_client.get_received()
@@ -82,6 +104,7 @@ def main() -> None:
     first_message = first_event["args"][0]
     assert first_message["body"] == "First message"
     assert first_message["reply_to"] is None
+    assert first_message["profile_picture_url"] == profile_picture_url
 
     socket_client.emit(
         "send_message",
@@ -142,7 +165,7 @@ def main() -> None:
     response = client.get("/health")
     assert response.json == {"status": "ok"}
     socket_client.disconnect()
-    print("PASS: login, permanent history paging, replies, reactions, uploads, and health route work.")
+    print("PASS: login, profile picture, 24-hour note, history, replies, reactions, uploads, and health work.")
 
 
 if __name__ == "__main__":

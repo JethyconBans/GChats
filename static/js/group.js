@@ -37,6 +37,20 @@
     const replyComposerText = document.getElementById("reply-composer-text");
     const cancelReplyButton = document.getElementById("cancel-reply-button");
 
+    const profileModal = document.getElementById("profile-modal");
+    const closeProfileModalButton = document.getElementById("close-profile-modal");
+    const profileModalAvatar = document.getElementById("profile-modal-avatar");
+    const profileModalUsername = document.getElementById("profile-modal-username");
+    const profilePictureLimit = document.getElementById("profile-picture-limit");
+    const chooseProfilePictureButton = document.getElementById("choose-profile-picture");
+    const removeProfilePictureButton = document.getElementById("remove-profile-picture");
+    const profilePictureInput = document.getElementById("profile-picture-input");
+    const profileNoteInput = document.getElementById("profile-note-input");
+    const profileNoteCount = document.getElementById("profile-note-count");
+    const saveProfileNoteButton = document.getElementById("save-profile-note");
+    const clearProfileNoteButton = document.getElementById("clear-profile-note");
+    const profileStatus = document.getElementById("profile-status");
+
     const activeCallBanner = document.getElementById("active-call-banner");
     const activeCallTitle = document.getElementById("active-call-title");
     const activeCallDetails = document.getElementById("active-call-details");
@@ -71,7 +85,25 @@
     ];
     const peerNames = new Map();
     const pendingIce = new Map();
-    let allMembers = Array.isArray(appData.members) ? appData.members : [];
+
+    function normalizeMember(member) {
+        if (typeof member === "string") {
+            return { username: member, profile_picture_url: null, note: "", note_expires_at: null };
+        }
+        return {
+            username: String(member?.username || ""),
+            profile_picture_url: member?.profile_picture_url || null,
+            note: String(member?.note || ""),
+            note_expires_at: member?.note_expires_at || null,
+        };
+    }
+
+    let allMembers = Array.isArray(appData.members)
+        ? appData.members.map(normalizeMember).filter((member) => member.username)
+        : [];
+    let currentProfile = normalizeMember(
+        appData.currentProfile || allMembers.find((member) => member.username === appData.username) || appData.username
+    );
 
     let onlineNames = new Set();
     let localStream = null;
@@ -91,12 +123,42 @@
     const normalPageTitle = document.title;
 
     currentUsername.textContent = appData.username;
-    currentUserAvatar.textContent = initials(appData.username);
-    mobileProfileAvatar.textContent = initials(appData.username);
 
     function initials(username) {
-        return username.slice(0, 2).toUpperCase();
+        return String(username || "?").slice(0, 2).toUpperCase();
     }
+
+    function setAvatar(element, username, pictureUrl) {
+        if (!element) return;
+        const url = String(pictureUrl || "").trim();
+        element.textContent = url ? "" : initials(username);
+        element.classList.toggle("has-profile-photo", Boolean(url));
+        element.style.backgroundImage = url ? `url("${url.replaceAll('"', '%22')}")` : "";
+        element.setAttribute("aria-label", `${username} profile picture`);
+    }
+
+    function memberFor(username) {
+        const wanted = String(username || "").toLocaleLowerCase();
+        return allMembers.find((member) => member.username.toLocaleLowerCase() === wanted) || null;
+    }
+
+    function activeNote(member) {
+        const note = String(member?.note || "").trim();
+        if (!note) return "";
+        if (!member?.note_expires_at) return note;
+        const expires = new Date(member.note_expires_at).getTime();
+        return Number.isFinite(expires) && expires > Date.now() ? note : "";
+    }
+
+    function updateOwnProfileSurfaces() {
+        setAvatar(currentUserAvatar, currentProfile.username, currentProfile.profile_picture_url);
+        setAvatar(mobileProfileAvatar, currentProfile.username, currentProfile.profile_picture_url);
+        setAvatar(profileModalAvatar, currentProfile.username, currentProfile.profile_picture_url);
+        if (profileModalUsername) profileModalUsername.textContent = currentProfile.username;
+        if (profilePictureLimit) profilePictureLimit.textContent = String(appData.profileMaxUploadMb || 5);
+    }
+
+    updateOwnProfileSurfaces();
 
     function formatTime(isoTime) {
         const date = new Date(isoTime);
@@ -111,7 +173,7 @@
             const empty = document.createElement("div");
             empty.className = "empty-state";
             empty.id = "empty-state";
-            empty.innerHTML = "<div><strong>Welcome to G-Chats</strong><span>Everyone registered with your invite code shares this conversation.</span></div>";
+            empty.innerHTML = "<div><strong>Welcome to Kulot Friends</strong><span>Everyone registered with your invite code shares this conversation.</span></div>";
             messagesElement.appendChild(empty);
         }
     }
@@ -329,9 +391,12 @@
             article.dataset.messageId = String(messageId);
         }
 
+        article.dataset.username = String(message.username || "").toLocaleLowerCase();
+
         const avatar = document.createElement("div");
         avatar.className = "message-avatar";
-        avatar.textContent = initials(message.username);
+        const member = memberFor(message.username);
+        setAvatar(avatar, message.username, message.profile_picture_url || member?.profile_picture_url);
 
         const content = document.createElement("div");
         content.className = "message-content";
@@ -745,6 +810,192 @@
             : normalPageTitle;
     }
 
+    function setProfileStatus(text = "", isError = false) {
+        if (!profileStatus) return;
+        profileStatus.textContent = text;
+        profileStatus.classList.toggle("error", Boolean(isError));
+    }
+
+    function refreshProfileModalFields() {
+        updateOwnProfileSurfaces();
+        if (profileNoteInput) profileNoteInput.value = activeNote(currentProfile);
+        if (profileNoteCount) profileNoteCount.textContent = String(profileNoteInput?.value.length || 0);
+        if (removeProfilePictureButton) removeProfilePictureButton.disabled = !currentProfile.profile_picture_url;
+    }
+
+    function openProfileModal() {
+        if (!profileModal) return;
+        setProfileStatus("");
+        refreshProfileModalFields();
+        profileModal.classList.remove("hidden");
+        document.body.classList.add("modal-open");
+        window.setTimeout(() => profileNoteInput?.focus(), 80);
+    }
+
+    function closeProfileModal() {
+        if (!profileModal) return;
+        profileModal.classList.add("hidden");
+        document.body.classList.remove("modal-open");
+        setProfileStatus("");
+    }
+
+    function updateProfileEverywhere(profile) {
+        const normalized = normalizeMember(profile);
+        if (!normalized.username) return;
+        const index = allMembers.findIndex(
+            (member) => member.username.toLocaleLowerCase() === normalized.username.toLocaleLowerCase()
+        );
+        if (index >= 0) allMembers[index] = normalized;
+        else allMembers.push(normalized);
+
+        if (normalized.username.toLocaleLowerCase() === appData.username.toLocaleLowerCase()) {
+            currentProfile = normalized;
+            updateOwnProfileSurfaces();
+            refreshProfileModalFields();
+        }
+
+        messageStore.forEach((message) => {
+            if (String(message.username).toLocaleLowerCase() === normalized.username.toLocaleLowerCase()) {
+                message.profile_picture_url = normalized.profile_picture_url;
+            }
+        });
+        messagesElement.querySelectorAll(".message").forEach((article) => {
+            if (article.dataset.username === normalized.username.toLocaleLowerCase()) {
+                setAvatar(
+                    article.querySelector(".message-avatar"),
+                    normalized.username,
+                    normalized.profile_picture_url
+                );
+            }
+        });
+        renderMembers();
+    }
+
+    async function readJsonResponse(response) {
+        try {
+            return await response.json();
+        } catch {
+            return {};
+        }
+    }
+
+    async function uploadProfilePicture(file) {
+        if (!file) return;
+        const maxBytes = Number(appData.profileMaxUploadMb || 5) * 1024 * 1024;
+        if (!file.type.startsWith("image/")) {
+            setProfileStatus("Choose a JPG, PNG, GIF, or WEBP picture.", true);
+            return;
+        }
+        if (file.size > maxBytes) {
+            setProfileStatus(`The picture is too large. Maximum size is ${appData.profileMaxUploadMb || 5} MB.`, true);
+            return;
+        }
+
+        const data = new FormData();
+        data.append("file", file);
+        chooseProfilePictureButton.disabled = true;
+        removeProfilePictureButton.disabled = true;
+        setProfileStatus("Uploading profile picture…");
+        try {
+            const response = await fetch("/api/profile/picture", {
+                method: "POST",
+                headers: { "X-CSRF-Token": appData.csrfToken },
+                body: data,
+            });
+            const result = await readJsonResponse(response);
+            if (!response.ok) throw new Error(result.error || "Could not upload the profile picture.");
+            updateProfileEverywhere(result.profile);
+            setProfileStatus("Profile picture updated.");
+        } catch (error) {
+            setProfileStatus(error.message || "Could not upload the profile picture.", true);
+        } finally {
+            chooseProfilePictureButton.disabled = false;
+            removeProfilePictureButton.disabled = !currentProfile.profile_picture_url;
+            profilePictureInput.value = "";
+        }
+    }
+
+    async function removeProfilePicture() {
+        if (!currentProfile.profile_picture_url) return;
+        removeProfilePictureButton.disabled = true;
+        setProfileStatus("Removing profile picture…");
+        try {
+            const response = await fetch("/api/profile/picture/remove", {
+                method: "POST",
+                headers: { "X-CSRF-Token": appData.csrfToken },
+            });
+            const result = await readJsonResponse(response);
+            if (!response.ok) throw new Error(result.error || "Could not remove the profile picture.");
+            updateProfileEverywhere(result.profile);
+            setProfileStatus("Profile picture removed.");
+        } catch (error) {
+            setProfileStatus(error.message || "Could not remove the profile picture.", true);
+        } finally {
+            removeProfilePictureButton.disabled = !currentProfile.profile_picture_url;
+        }
+    }
+
+    async function saveProfileNote(noteValue = profileNoteInput?.value || "") {
+        const note = String(noteValue).trim();
+        saveProfileNoteButton.disabled = true;
+        clearProfileNoteButton.disabled = true;
+        setProfileStatus(note ? "Sharing your note…" : "Clearing your note…");
+        try {
+            const response = await fetch("/api/profile/note", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "X-CSRF-Token": appData.csrfToken,
+                },
+                body: JSON.stringify({ note }),
+            });
+            const result = await readJsonResponse(response);
+            if (!response.ok) throw new Error(result.error || "Could not update your note.");
+            updateProfileEverywhere(result.profile);
+            setProfileStatus(note ? "Your note is visible for 24 hours." : "Your note was cleared.");
+        } catch (error) {
+            setProfileStatus(error.message || "Could not update your note.", true);
+        } finally {
+            saveProfileNoteButton.disabled = false;
+            clearProfileNoteButton.disabled = false;
+        }
+    }
+
+    document.querySelectorAll(".profile-open-button").forEach((button) => {
+        button.addEventListener("click", openProfileModal);
+    });
+    closeProfileModalButton?.addEventListener("click", closeProfileModal);
+    profileModal?.addEventListener("click", (event) => {
+        if (event.target === profileModal) closeProfileModal();
+    });
+    chooseProfilePictureButton?.addEventListener("click", () => profilePictureInput?.click());
+    profilePictureInput?.addEventListener("change", () => uploadProfilePicture(profilePictureInput.files?.[0]));
+    removeProfilePictureButton?.addEventListener("click", removeProfilePicture);
+    profileNoteInput?.addEventListener("input", () => {
+        profileNoteCount.textContent = String(profileNoteInput.value.length);
+    });
+    profileNoteInput?.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+            event.preventDefault();
+            saveProfileNote();
+        }
+    });
+    saveProfileNoteButton?.addEventListener("click", () => saveProfileNote());
+    clearProfileNoteButton?.addEventListener("click", () => {
+        profileNoteInput.value = "";
+        profileNoteCount.textContent = "0";
+        saveProfileNote("");
+    });
+    document.addEventListener("keydown", (event) => {
+        if (event.key === "Escape" && !profileModal?.classList.contains("hidden")) {
+            closeProfileModal();
+        }
+    });
+
+    socket.on("profile_updated", (payload) => {
+        if (payload?.profile) updateProfileEverywhere(payload.profile);
+    });
+
     function updateNotificationButtons() {
         const supported = "Notification" in window && "serviceWorker" in navigator;
         [notificationButton, mobileNotificationButton].forEach((button) => {
@@ -794,7 +1045,7 @@
             updateNotificationButtons();
             if (permission !== "granted") return;
             notificationRegistration = notificationRegistration || await navigator.serviceWorker.ready;
-            await notificationRegistration.showNotification("G-Chats", {
+            await notificationRegistration.showNotification("Kulot Friends", {
                 body: "Message notifications are enabled.",
                 tag: "notifications-enabled",
                 icon: "/static/icon-192.png",
@@ -817,7 +1068,7 @@
                 : "Sent a message";
         const notificationText = fullMessage || fallback;
         const preview = notificationText.length > 120 ? `${notificationText.slice(0, 117)}...` : notificationText;
-        await registration.showNotification(`${message.username} · G-Chats`, {
+        await registration.showNotification(`${message.username} · Kulot Friends`, {
             body: preview,
             tag: `message-${message.id}`,
             data: { url: "/chat" },
@@ -863,6 +1114,18 @@
     mobileNotificationButton?.addEventListener("click", enableNotifications);
     registerNotificationWorker();
 
+    let noteExpiryTimer = null;
+
+    function scheduleNoteRefresh() {
+        if (noteExpiryTimer) window.clearTimeout(noteExpiryTimer);
+        const expirations = allMembers
+            .map((member) => new Date(member.note_expires_at || "").getTime())
+            .filter((time) => Number.isFinite(time) && time > Date.now());
+        if (!expirations.length) return;
+        const delay = Math.max(250, Math.min(...expirations) - Date.now() + 200);
+        noteExpiryTimer = window.setTimeout(renderMembers, Math.min(delay, 2147483000));
+    }
+
     function renderMembers() {
         memberList.replaceChildren();
         memberStories.replaceChildren();
@@ -870,11 +1133,15 @@
         onlineCount.textContent = String(onlineNames.size);
 
         const orderedMembers = [...allMembers].sort((a, b) => {
-            const onlineDifference = Number(onlineNames.has(b)) - Number(onlineNames.has(a));
-            return onlineDifference || a.localeCompare(b);
+            if (a.username === appData.username) return -1;
+            if (b.username === appData.username) return 1;
+            const onlineDifference = Number(onlineNames.has(b.username)) - Number(onlineNames.has(a.username));
+            return onlineDifference || a.username.localeCompare(b.username);
         });
 
-        orderedMembers.forEach((username) => {
+        orderedMembers.forEach((member) => {
+            const username = member.username;
+            const note = activeNote(member);
             const online = onlineNames.has(username);
             const item = document.createElement("li");
             item.className = `member-item${online ? "" : " offline"}`;
@@ -882,7 +1149,7 @@
 
             const avatar = document.createElement("span");
             avatar.className = "avatar";
-            avatar.textContent = initials(username);
+            setAvatar(avatar, username, member.profile_picture_url);
 
             const details = document.createElement("span");
             details.className = "member-details";
@@ -891,35 +1158,64 @@
             name.textContent = username === appData.username ? `${username} (you)` : username;
 
             const status = document.createElement("small");
-            status.textContent = online ? "Active now" : "Offline";
+            status.className = note ? "member-note-text" : "";
+            status.textContent = note || (online ? "Active now" : "Offline");
 
             details.append(name, status);
             item.append(avatar, details);
+            if (username === appData.username) {
+                item.classList.add("profile-open-item");
+                item.tabIndex = 0;
+                item.setAttribute("role", "button");
+                item.setAttribute("aria-label", "Edit your profile and note");
+                item.addEventListener("click", openProfileModal);
+                item.addEventListener("keydown", (event) => {
+                    if (event.key === "Enter" || event.key === " ") openProfileModal();
+                });
+            }
             memberList.appendChild(item);
 
-            const story = document.createElement("div");
+            const story = document.createElement("button");
+            story.type = "button";
             story.className = `story-person${online ? "" : " offline"}`;
             story.dataset.username = username.toLocaleLowerCase();
+            story.title = username === appData.username ? "Edit profile or note" : (note || username);
+            if (username === appData.username) story.addEventListener("click", openProfileModal);
+            else story.disabled = true;
+
             const storyWrap = document.createElement("div");
             storyWrap.className = "story-avatar-wrap";
             const storyAvatar = document.createElement("span");
             storyAvatar.className = "story-avatar";
-            storyAvatar.textContent = initials(username);
+            setAvatar(storyAvatar, username, member.profile_picture_url);
             const storyOnline = document.createElement("span");
             storyOnline.className = "story-online";
             const storyName = document.createElement("small");
             storyName.textContent = username === appData.username ? "You" : username;
+
+            if (note || username === appData.username) {
+                const noteBubble = document.createElement("span");
+                noteBubble.className = `story-note${note ? "" : " empty-note"}`;
+                noteBubble.textContent = note || "Add note";
+                story.appendChild(noteBubble);
+            }
             storyWrap.append(storyAvatar, storyOnline);
             story.append(storyWrap, storyName);
             memberStories.appendChild(story);
         });
 
         applyUserSearch(activeUserSearch);
+        scheduleNoteRefresh();
     }
 
     socket.on("online_users", (payload) => {
         const users = Array.isArray(payload?.users) ? payload.users : [];
-        if (Array.isArray(payload?.members)) allMembers = payload.members;
+        if (Array.isArray(payload?.members)) {
+            allMembers = payload.members.map(normalizeMember).filter((member) => member.username);
+            const own = memberFor(appData.username);
+            if (own) currentProfile = own;
+            updateOwnProfileSurfaces();
+        }
         onlineNames = new Set(users);
         renderMembers();
     });
@@ -1106,7 +1402,7 @@
         const isVideo = call.mode === "video";
         incomingCallIcon.textContent = isVideo ? "📹" : "☎";
         incomingCallTitle.textContent = isVideo ? "Incoming group video call" : "Incoming group voice call";
-        incomingCallText.textContent = `${call.started_by} is calling G-Chats`;
+        incomingCallText.textContent = `${call.started_by} is calling Kulot Friends`;
         incomingCall.classList.remove("hidden");
     }
 
