@@ -1,8 +1,8 @@
 {
   "id": "/",
-  "name": "Kulot Friends",
-  "short_name": "Kulot Friends",
-  "description": "Private group chat, voice calls, and video calls for Kulot and friends.",
+  "name": "G-Chats",
+  "short_name": "G-Chats",
+  "description": "Private group chat, voice calls, and video calls for G-Chats and friends.",
   "start_url": "/chat",
   "scope": "/",
   "display": "standalone",

@@ -1,0 +1,5 @@
+cd C:\PY_project\kulot-friends-chat
+git status
+git add .
+git commit -m "Update GChats"
+git push origin main

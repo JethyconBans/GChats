@@ -111,7 +111,7 @@
             const empty = document.createElement("div");
             empty.className = "empty-state";
             empty.id = "empty-state";
-            empty.innerHTML = "<div><strong>Welcome to Kulot Friends</strong><span>Everyone registered with your invite code shares this conversation.</span></div>";
+            empty.innerHTML = "<div><strong>Welcome to G-Chats</strong><span>Everyone registered with your invite code shares this conversation.</span></div>";
             messagesElement.appendChild(empty);
         }
     }
@@ -794,7 +794,7 @@
             updateNotificationButtons();
             if (permission !== "granted") return;
             notificationRegistration = notificationRegistration || await navigator.serviceWorker.ready;
-            await notificationRegistration.showNotification("Kulot Friends", {
+            await notificationRegistration.showNotification("G-Chats", {
                 body: "Message notifications are enabled.",
                 tag: "notifications-enabled",
                 icon: "/static/icon-192.png",
@@ -817,7 +817,7 @@
                 : "Sent a message";
         const notificationText = fullMessage || fallback;
         const preview = notificationText.length > 120 ? `${notificationText.slice(0, 117)}...` : notificationText;
-        await registration.showNotification(`${message.username} · Kulot Friends`, {
+        await registration.showNotification(`${message.username} · G-Chats`, {
             body: preview,
             tag: `message-${message.id}`,
             data: { url: "/chat" },
@@ -1106,7 +1106,7 @@
         const isVideo = call.mode === "video";
         incomingCallIcon.textContent = isVideo ? "📹" : "☎";
         incomingCallTitle.textContent = isVideo ? "Incoming group video call" : "Incoming group voice call";
-        incomingCallText.textContent = `${call.started_by} is calling Kulot Friends`;
+        incomingCallText.textContent = `${call.started_by} is calling G-Chats`;
         incomingCall.classList.remove("hidden");
     }
 
