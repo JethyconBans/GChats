@@ -1,0 +1,22 @@
+GCHATS MENU + DARK/LIGHT MODE PATCH
+
+Copy these files into your project and replace the old versions:
+- templates/base.html
+- templates/group.html
+- static/js/group.js
+- static/css/style.css
+
+The three-line menu is placed on the right side. It contains:
+- Create group chat
+- Settings
+- Dark mode / Light mode
+
+The selected theme is saved in the browser using localStorage.
+
+After copying, run locally:
+  python app.py
+
+Then update GitHub and Render:
+  git add templates/base.html templates/group.html static/js/group.js static/css/style.css
+  git commit -m "Add right menu and theme settings"
+  git push origin main

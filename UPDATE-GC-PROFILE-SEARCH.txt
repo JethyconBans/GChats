@@ -1,0 +1,24 @@
+GCHATS GC PROFILE + USERNAME SEARCH UPDATE
+
+New features:
+- Every GC member can edit the GC name.
+- Every GC member can upload, replace, or remove the GC picture.
+- Group pictures use Cloudinary when CLOUDINARY_URL is configured.
+- Create Group Chat includes a username-only search bar.
+- Shows how many friends are selected.
+- Updates the GC name and picture live for connected members.
+- Includes the SQLite conversation_id migration-order fix.
+
+Install:
+1. Back up your project and instance/friends.db.
+2. Copy all files from this patch into C:\PY_project\kulot-friends-chat.
+3. Choose Replace files in destination.
+4. Keep your .env, venv, and instance folder.
+5. Run: python smoke_test.py
+6. Run: python app.py
+7. Test Create group chat and the pencil button inside a GC.
+8. Push to GitHub and wait for Render Deploy live.
+
+Cloud note:
+- With CLOUDINARY_URL, GC pictures remain after Render redeploys.
+- Without Cloudinary, local GC pictures can disappear on Render free hosting.

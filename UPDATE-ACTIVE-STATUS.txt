@@ -1,0 +1,41 @@
+GCHATS ACTIVE STATUS + LAST SEEN UPDATE
+========================================
+
+WHAT THIS UPDATE ADDS
+- Green dot and "Active now" while a friend is connected.
+- Gray dot and last offline time after the friend disconnects.
+- Examples: "Offline · just now", "Offline · 8m ago", "Offline · yesterday at 9:30 PM".
+- Private-chat header shows the selected friend's live status.
+- Group-chat header shows how many members are active.
+- Private conversation avatars show green/gray presence dots.
+- Create-GC member list also shows active/last-seen status.
+- Presence heartbeat keeps the last-seen time useful if the connection drops or the server restarts.
+
+INSTALL
+1. Stop the local server with Ctrl+C.
+2. Back up the project and database.
+3. Copy the patch files into C:\PY_project\kulot-friends-chat.
+4. Choose Replace files in the destination.
+5. Do not delete .env, venv, instance, or instance\friends.db.
+
+TEST LOCALLY
+cd C:\PY_project\kulot-friends-chat
+.\venv\Scripts\Activate.ps1
+python smoke_test.py
+python app.py
+
+Open two different accounts in two browsers. Close one browser and watch the other account change from "Active now" to an offline time.
+
+UPLOAD TO GITHUB / RENDER
+git add app.py smoke_test.py templates/group.html static/js/group.js static/css/style.css
+git commit -m "Add active status and last seen"
+git push origin main
+
+Wait for Render to show Deploy live, then refresh with Ctrl+F5 or close and reopen the APK.
+
+IMPORTANT
+- The users table is updated automatically with a last_seen_at column.
+- Existing users may display only "Offline" until they connect once.
+- Keep DATABASE_URL connected to Neon so last-seen times survive deployments.
+- Keep the Render start command on one worker:
+  gunicorn -w 1 --threads 100 app:app

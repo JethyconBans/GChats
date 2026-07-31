@@ -1,0 +1,27 @@
+GCHATS PROFILE BIO + PICTURE VIEWER UPDATE
+
+New features:
+- Permanent user bio (up to 160 characters)
+- Public user profile card with profile picture, note, bio, and active/offline status
+- Tap a message avatar/name, a friend story, or a direct-chat header avatar to view the profile
+- Full-screen picture/video viewer with a Back button
+- Download button for pictures and videos sent in chats
+- SQLite and PostgreSQL automatically add the new bio_text column
+
+INSTALL
+1. Stop the server with Ctrl+C.
+2. Back up the project and database.
+3. Copy the patch files into C:\PY_project\kulot-friends-chat and replace existing files.
+4. Do not delete .env, venv, or instance.
+5. Run:
+   .\venv\Scripts\Activate.ps1
+   python smoke_test.py
+   python app.py
+6. Refresh the browser with Ctrl+F5.
+
+UPLOAD
+  git add app.py smoke_test.py templates/group.html static/js/group.js static/css/style.css
+  git commit -m "Add user bios profile viewer and media downloads"
+  git push origin main
+
+Render will deploy automatically. Keep DATABASE_URL configured so bios remain permanent.

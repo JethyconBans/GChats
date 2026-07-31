@@ -1,0 +1,44 @@
+GCHATS PRIVATE CHAT + GROUP CHAT UPDATE
+=======================================
+
+NEW FEATURES
+- Messenger-style chat inbox
+- Tap any registered username to open a private chat
+- Create group chats (GCs) with selected friends
+- Existing Kulot Friends messages are automatically migrated to the default group
+- Each private chat and group chat has separate permanent message history
+- Pictures, videos, links, replies, reactions, emoji, profiles, notes, voice calls, and video calls work inside the selected conversation
+- Conversation access is checked on the server; non-members cannot open or read a GC/private chat
+
+INSTALL PATCH
+1. Back up C:\PY_project\kulot-friends-chat
+2. Extract the patch.
+3. Copy all patch files into C:\PY_project\kulot-friends-chat
+4. Choose Replace files in destination.
+5. Do not delete .env, venv, or instance.
+
+LOCAL TEST
+cd C:\PY_project\kulot-friends-chat
+.\venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+python smoke_test.py
+python app.py
+
+Open http://127.0.0.1:5000
+
+HOW TO USE
+- Chats screen: tap a friend to create/open a private conversation.
+- Create GC: tap the + or pencil button, enter a group name, select friends, then tap Create group.
+- Existing one-group chat remains as Kulot Friends.
+
+UPDATE GITHUB AND RENDER
+git add app.py smoke_test.py templates/group.html static/js/group.js static/css/style.css
+git commit -m "Add private chats and group chats"
+git push origin main
+
+Wait for Render to show Deploy live, then refresh the website/app.
+
+IMPORTANT CLOUD STORAGE
+- DATABASE_URL must point to Neon PostgreSQL so conversations/messages survive redeploys.
+- CLOUDINARY_URL must contain real Cloudinary credentials so pictures/videos/profile photos remain permanent.
+- Never upload .env, DATABASE_URL, CLOUDINARY_URL, or API secrets to GitHub.

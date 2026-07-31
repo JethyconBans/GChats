@@ -20,8 +20,8 @@
     "path": "C:\\PY_project\\kulot-friends-chat\\android.keystore",
     "alias": "android"
   },
-  "appVersionName": "1",
-  "appVersionCode": 1,
+  "appVersionName": "1.1.0",
+  "appVersionCode": 2,
   "shortcuts": [],
   "generatorApp": "bubblewrap-cli",
   "webManifestUrl": "https://kulot-friends-chat.onrender.com/static/manifest.webmanifest",
@@ -46,5 +46,5 @@
     "window-controls-overlay",
     "standalone"
   ],
-  "appVersion": "1"
+  "appVersion": "1.1.0"
 }

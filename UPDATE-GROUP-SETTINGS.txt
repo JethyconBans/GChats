@@ -1,0 +1,15 @@
+GChats group settings update
+
+New features:
+- Small three-dot group settings button on the right side of group-chat headers.
+- View members with profile pictures and active/offline status.
+- Tap a member to open their public profile.
+- Leave user-created group chats with confirmation.
+- The original Kulot Friends main group cannot be left.
+
+Files changed:
+- app.py
+- templates/group.html
+- static/js/group.js
+- static/css/style.css
+- smoke_test.py
