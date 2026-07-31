@@ -1,187 +1,198 @@
 {% extends "base.html" %}
-{% block title %}Kulot Friends{% endblock %}
+{% block title %}GChats{% endblock %}
 {% block body %}
-<div class="app-shell messenger-shell">
+{% set selected = app_data.selectedConversation %}
+<div class="app-shell messenger-shell {% if not selected %}inbox-only{% endif %}">
     <aside class="sidebar">
         <div class="sidebar-brand-row">
             <div>
                 <span class="eyebrow">Private messenger</span>
-                <h1>Kulot Friends</h1>
+                <h1>GChats</h1>
             </div>
-            <div class="brand-mark small">KF</div>
+            <button id="desktop-app-menu-button" class="brand-mark small brand-action app-menu-trigger" type="button" title="Open menu" aria-label="Open menu" aria-expanded="false">
+                <span class="hamburger-lines" aria-hidden="true"><i></i><i></i><i></i></span>
+            </button>
         </div>
 
-        <label class="sidebar-search" for="desktop-user-search">
+        <label class="sidebar-search" for="desktop-chat-search">
             <span aria-hidden="true">⌕</span>
-            <input
-                id="desktop-user-search"
-                type="search"
-                placeholder="Search username"
-                autocomplete="off"
-                aria-label="Search registered usernames"
-            >
+            <input id="desktop-chat-search" type="search" placeholder="Search chats or username" autocomplete="off">
         </label>
 
-        <button class="conversation-card active" type="button">
-            <span class="conversation-card-avatar">KF</span>
-            <span class="conversation-card-copy">
-                <strong>Kulot Friends</strong>
-                <small>One private group for everyone</small>
-            </span>
-            <span class="conversation-card-dot"></span>
-        </button>
+        <nav id="desktop-conversation-list" class="conversation-list" aria-label="Conversations">
+            {% for conversation in app_data.conversations %}
+            <a class="conversation-card {% if selected and selected.id == conversation.id %}active{% endif %}"
+               href="{{ url_for('chat_conversation', conversation_id=conversation.id) }}"
+               data-conversation-id="{{ conversation.id }}"
+               data-conversation-name="{{ conversation.name|lower }}">
+                <span class="conversation-card-avatar {% if conversation.avatar_url %}has-profile-photo{% endif %}"
+                      {% if conversation.avatar_url %}style="background-image:url('{{ conversation.avatar_url }}')"{% endif %}>
+                    {% if not conversation.avatar_url %}{{ conversation.name[:2]|upper }}{% endif %}
+                </span>
+                <span class="conversation-card-copy">
+                    <strong>{{ conversation.name }}</strong>
+                    <small>{% if conversation.last_sender %}{{ conversation.last_sender }}: {% endif %}{{ conversation.last_message }}</small>
+                </span>
+                <span class="conversation-card-meta">
+                    {% if conversation.type == 'group' %}<em>GC</em>{% endif %}
+                </span>
+            </a>
+            {% endfor %}
+        </nav>
 
-        <div class="sidebar-section">
-            <div class="section-title">People · <span id="member-count">0</span></div>
+        <div class="sidebar-section private-chat-section">
+            <div class="section-title">Start private chat</div>
             <ul id="member-list" class="member-list"></ul>
         </div>
 
         <div class="sidebar-bottom">
             <div class="current-user">
-                <button class="profile-avatar profile-open-button" id="current-user-avatar" type="button" title="Edit profile and note" aria-label="Edit profile and note">KF</button>
-                <span>
-                    <strong id="current-username"></strong>
-                    <small>Signed in</small>
-                </span>
+                <button class="profile-avatar profile-open-button" id="current-user-avatar" type="button" title="Edit profile and note">GC</button>
+                <span><strong id="current-username"></strong><small>Signed in</small></span>
             </div>
             <form method="post" action="{{ url_for('logout') }}">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                <button class="icon-button" type="submit" title="Log out" aria-label="Log out">↪</button>
+                <button class="icon-button" type="submit" title="Log out">↪</button>
             </form>
         </div>
     </aside>
 
     <main class="main-panel">
-        <div class="mobile-brand-bar">
-            <strong>messenger</strong>
-            <button class="mobile-profile-avatar profile-open-button" id="mobile-profile-avatar" type="button" title="Edit profile and note" aria-label="Edit profile and note">KF</button>
-        </div>
-
-        <label class="mobile-search" for="mobile-user-search">
-            <span aria-hidden="true">⌕</span>
-            <input
-                id="mobile-user-search"
-                type="search"
-                placeholder="Search username"
-                autocomplete="off"
-                aria-label="Search registered usernames"
-            >
-        </label>
-
-        <header class="topbar messenger-topbar">
-            <div class="conversation-title">
-                <div class="conversation-avatar">KF<span class="online-badge"></span></div>
-                <div>
-                    <h1>Kulot Friends</h1>
-                    <p><span id="online-count">0</span> active now</p>
-                </div>
-            </div>
-            <div class="call-actions">
-                <button id="notification-button" class="round-call-button" type="button" title="Enable message notifications" aria-label="Enable message notifications">🔔</button>
-                <button id="voice-call-button" class="round-call-button" type="button" title="Start group voice call" aria-label="Start group voice call">☎</button>
-                <button id="video-call-button" class="round-call-button" type="button" title="Start group video call" aria-label="Start group video call">▣</button>
-            </div>
-        </header>
-
-        <section class="member-stories-wrap" aria-label="Friends">
-            <div id="member-stories" class="member-stories"></div>
-        </section>
-
-        {% with messages = get_flashed_messages(with_categories=true) %}
-            {% for category, message in messages %}
-                <div class="alert alert-{{ category }} chat-alert">{{ message }}</div>
-            {% endfor %}
-        {% endwith %}
-
-        <section id="active-call-banner" class="active-call-banner hidden" aria-live="polite">
-            <div>
-                <strong id="active-call-title">Group call active</strong>
-                <span id="active-call-details"></span>
-            </div>
-            <button id="join-active-call-button" class="button button-primary" type="button">Join call</button>
-        </section>
-
-        <section id="call-panel" class="call-panel hidden" aria-label="Group call">
-            <div class="call-toolbar">
-                <strong id="call-heading">Group call</strong>
-                <span id="call-status">Connecting…</span>
-                <div class="toolbar-spacer"></div>
-                <button id="mute-button" class="button button-secondary" type="button">Mute</button>
-                <button id="camera-button" class="button button-secondary" type="button">Camera off</button>
-                <button id="leave-call-button" class="button button-danger" type="button">Leave</button>
-            </div>
-            <div id="video-grid" class="video-grid"></div>
-        </section>
-
-        <div id="history-status" class="history-status hidden" role="status" aria-live="polite"></div>
-        <section id="messages" class="messages" aria-live="polite"></section>
-
-        <div id="upload-status" class="upload-status hidden" role="status" aria-live="polite">
-            <span class="upload-spinner" aria-hidden="true"></span>
-            <span id="upload-status-text">Uploading…</span>
-        </div>
-
-        <div id="reply-composer-bar" class="reply-composer-bar hidden" role="status" aria-live="polite">
-            <div class="reply-composer-copy">
-                <span id="reply-composer-label">Replying to a message</span>
-                <strong id="reply-composer-name"></strong>
-                <small id="reply-composer-text"></small>
-            </div>
-            <button id="cancel-reply-button" class="reply-cancel-button" type="button" title="Cancel reply" aria-label="Cancel reply">✕</button>
-        </div>
-
-        <div class="composer-shell">
-            <div class="attachment-picker">
-                <button
-                    id="attachment-button"
-                    class="composer-icon"
-                    type="button"
-                    title="Send a picture, video, or link"
-                    aria-label="Send a picture, video, or link"
-                    aria-expanded="false"
-                    aria-controls="attachment-menu"
-                >＋</button>
-
-                <div id="attachment-menu" class="attachment-menu hidden" role="menu">
-                    <button id="send-picture-button" class="attachment-option" type="button" role="menuitem">
-                        <span class="attachment-option-icon picture" aria-hidden="true">🖼</span>
-                        <span><strong>Picture</strong><small>JPG, PNG, GIF or WEBP</small></span>
-                    </button>
-                    <button id="send-video-button" class="attachment-option" type="button" role="menuitem">
-                        <span class="attachment-option-icon video" aria-hidden="true">▶</span>
-                        <span><strong>Video</strong><small>MP4, WEBM, OGG, MOV or M4V</small></span>
-                    </button>
-                    <button id="send-link-button" class="attachment-option" type="button" role="menuitem">
-                        <span class="attachment-option-icon link" aria-hidden="true">🔗</span>
-                        <span><strong>Link</strong><small>Paste a website address</small></span>
+        <section id="inbox-view" class="inbox-view {% if selected %}desktop-inbox-hidden{% endif %}">
+            <div class="mobile-brand-bar messenger-home-header">
+                <strong>messenger</strong>
+                <div class="messenger-home-actions">
+                    <button class="mobile-profile-avatar profile-open-button" id="mobile-profile-avatar" type="button" title="Edit profile">GC</button>
+                    <button id="mobile-app-menu-button" class="home-round-action app-menu-trigger" type="button" title="Open menu" aria-label="Open menu" aria-expanded="false">
+                        <span class="hamburger-lines" aria-hidden="true"><i></i><i></i><i></i></span>
                     </button>
                 </div>
-
-                <input id="picture-input" class="hidden-file-input" type="file" accept="image/jpeg,image/png,image/gif,image/webp">
-                <input id="video-input" class="hidden-file-input" type="file" accept="video/mp4,video/webm,video/ogg,video/quicktime,video/x-m4v">
             </div>
 
-            <form id="message-form" class="message-composer">
-                <div class="emoji-picker-wrap">
-                    <button
-                        id="emoji-button"
-                        class="composer-emoji-button"
-                        type="button"
-                        title="Add emoji"
-                        aria-label="Add emoji"
-                        aria-expanded="false"
-                        aria-controls="emoji-picker"
-                    >☺</button>
-                    <div id="emoji-picker" class="emoji-picker hidden" role="menu" aria-label="Choose an emoji"></div>
+            <label class="mobile-search" for="mobile-chat-search">
+                <span aria-hidden="true">⌕</span>
+                <input id="mobile-chat-search" type="search" placeholder="Search chats or username" autocomplete="off">
+            </label>
+
+            <section class="member-stories-wrap inbox-stories" aria-label="Friends and notes">
+                <div id="member-stories" class="member-stories"></div>
+            </section>
+
+            <div id="mobile-conversation-list" class="mobile-conversation-list">
+                {% for conversation in app_data.conversations %}
+                <a class="mobile-conversation-row" href="{{ url_for('chat_conversation', conversation_id=conversation.id) }}"
+                   data-conversation-id="{{ conversation.id }}"
+                   data-conversation-name="{{ conversation.name|lower }}">
+                    <span class="mobile-conversation-avatar {% if conversation.avatar_url %}has-profile-photo{% endif %}"
+                          {% if conversation.avatar_url %}style="background-image:url('{{ conversation.avatar_url }}')"{% endif %}>
+                        {% if not conversation.avatar_url %}{{ conversation.name[:2]|upper }}{% endif %}
+                    </span>
+                    <span class="mobile-conversation-copy">
+                        <strong>{{ conversation.name }}</strong>
+                        <small>{% if conversation.last_sender %}{{ conversation.last_sender }}: {% endif %}{{ conversation.last_message }}</small>
+                    </span>
+                    <span class="mobile-conversation-meta">{% if conversation.type == 'group' %}GC{% endif %}</span>
+                </a>
+                {% endfor %}
+                {% if not app_data.conversations %}
+                <div class="empty-inbox"><strong>No chats yet</strong><span>Tap a friend above or create a group chat.</span></div>
+                {% endif %}
+            </div>
+        </section>
+
+        <section id="chat-view" class="chat-view {% if not selected %}hidden{% endif %}">
+            <header class="topbar messenger-topbar">
+                <div class="conversation-title">
+                    <a class="mobile-back-button" href="{{ url_for('chat') }}" aria-label="Back to chats">‹</a>
+                    <div id="conversation-avatar" class="conversation-avatar {% if selected and selected.avatar_url %}has-profile-photo{% endif %}"
+                         {% if selected and selected.avatar_url %}style="background-image:url('{{ selected.avatar_url }}')"{% endif %}>
+                        {% if selected and not selected.avatar_url %}{{ selected.name[:2]|upper }}{% endif %}
+                        <span class="online-badge"></span>
+                    </div>
+                    <div>
+                        <h1 id="conversation-name">{{ selected.name if selected else 'Chats' }}</h1>
+                        <p id="conversation-status">{% if selected and selected.type == 'group' %}{{ selected.member_count }} members · 0 active now{% else %}Offline{% endif %}</p>
+                    </div>
                 </div>
-                <textarea id="message-input" rows="1" maxlength="1000" placeholder="Aa"></textarea>
-                <button class="send-button" type="submit" aria-label="Send message">➤</button>
-            </form>
-        </div>
-        <div id="chat-error" class="chat-error" role="alert"></div>
+                <div class="call-actions">
+                    {% if selected and selected.can_edit %}
+                    <button id="edit-group-button" class="round-call-button group-edit-trigger" type="button" title="Edit group name and picture" aria-label="Edit group name and picture">✎</button>
+                    <div class="group-options-wrap">
+                        <button id="group-options-button" class="round-call-button group-options-trigger" type="button" title="Group settings" aria-label="Group settings" aria-expanded="false" aria-controls="group-options-menu">⋮</button>
+                        <div id="group-options-menu" class="group-options-menu hidden" role="menu">
+                            <button id="view-group-members-button" class="group-options-item" type="button" role="menuitem">
+                                <span class="group-options-icon">👥</span>
+                                <span><strong>View members</strong><small id="group-options-member-count">{{ selected.member_count }} people</small></span>
+                            </button>
+                            <button id="leave-group-button" class="group-options-item group-options-danger" type="button" role="menuitem" {% if selected.is_default %}disabled title="The main group cannot be left"{% endif %}>
+                                <span class="group-options-icon">↪</span>
+                                <span><strong>Leave group</strong><small>{% if selected.is_default %}Main group members cannot leave{% else %}Stop receiving messages from this GC{% endif %}</small></span>
+                            </button>
+                        </div>
+                    </div>
+                    {% endif %}
+                    <button id="notification-button" class="round-call-button" type="button" title="Enable notifications">🔔</button>
+                    <button id="voice-call-button" class="round-call-button" type="button" title="Start voice call">☎</button>
+                    <button id="video-call-button" class="round-call-button" type="button" title="Start video call">▣</button>
+                </div>
+            </header>
+
+            {% with messages = get_flashed_messages(with_categories=true) %}
+                {% for category, message in messages %}<div class="alert alert-{{ category }} chat-alert">{{ message }}</div>{% endfor %}
+            {% endwith %}
+
+            <section id="active-call-banner" class="active-call-banner hidden" aria-live="polite">
+                <div><strong id="active-call-title">Call active</strong><span id="active-call-details"></span></div>
+                <button id="join-active-call-button" class="button button-primary" type="button">Join call</button>
+            </section>
+
+            <section id="call-panel" class="call-panel hidden" aria-label="Call">
+                <div class="call-toolbar">
+                    <strong id="call-heading">Call</strong><span id="call-status">Connecting…</span><div class="toolbar-spacer"></div>
+                    <button id="mute-button" class="button button-secondary" type="button">Mute</button>
+                    <button id="camera-button" class="button button-secondary" type="button">Camera off</button>
+                    <button id="leave-call-button" class="button button-danger" type="button">Leave</button>
+                </div>
+                <div id="video-grid" class="video-grid"></div>
+            </section>
+
+            <div id="history-status" class="history-status hidden" role="status"></div>
+            <section id="messages" class="messages" aria-live="polite"></section>
+
+            <div id="upload-status" class="upload-status hidden" role="status">
+                <span class="upload-spinner"></span><span id="upload-status-text">Uploading…</span>
+            </div>
+
+            <div id="reply-composer-bar" class="reply-composer-bar hidden">
+                <div class="reply-composer-copy"><span id="reply-composer-label">Replying to</span><strong id="reply-composer-name"></strong><small id="reply-composer-text"></small></div>
+                <button id="cancel-reply-button" class="reply-cancel-button" type="button">✕</button>
+            </div>
+
+            <div class="composer-shell">
+                <div class="attachment-picker">
+                    <button id="attachment-button" class="composer-icon" type="button" aria-expanded="false">＋</button>
+                    <div id="attachment-menu" class="attachment-menu hidden" role="menu">
+                        <button id="send-picture-button" class="attachment-option" type="button"><span class="attachment-option-icon picture">🖼</span><span><strong>Picture</strong><small>JPG, PNG, GIF or WEBP</small></span></button>
+                        <button id="send-video-button" class="attachment-option" type="button"><span class="attachment-option-icon video">▶</span><span><strong>Video</strong><small>MP4, WEBM, OGG, MOV or M4V</small></span></button>
+                        <button id="send-link-button" class="attachment-option" type="button"><span class="attachment-option-icon link">🔗</span><span><strong>Link</strong><small>Paste a website address</small></span></button>
+                    </div>
+                    <input id="picture-input" class="hidden-file-input" type="file" accept="image/jpeg,image/png,image/gif,image/webp">
+                    <input id="video-input" class="hidden-file-input" type="file" accept="video/mp4,video/webm,video/ogg,video/quicktime,video/x-m4v">
+                </div>
+                <form id="message-form" class="message-composer">
+                    <div class="emoji-picker-wrap">
+                        <button id="emoji-button" class="composer-emoji-button" type="button">☺</button>
+                        <div id="emoji-picker" class="emoji-picker hidden" role="menu"></div>
+                    </div>
+                    <textarea id="message-input" rows="1" maxlength="1000" placeholder="Aa"></textarea>
+                    <button class="send-button" type="submit">➤</button>
+                </form>
+            </div>
+            <div id="chat-error" class="chat-error" role="alert"></div>
+        </section>
 
         <nav class="mobile-bottom-nav" aria-label="Main navigation">
-            <button class="mobile-nav-item active" type="button"><span>●</span><small>Chats</small></button>
+            <a class="mobile-nav-item active" href="{{ url_for('chat') }}"><span>●</span><small>Chats</small></a>
             <button id="mobile-call-button" class="mobile-nav-item" type="button"><span>▣</span><small>Calls</small></button>
             <button id="mobile-notification-button" class="mobile-nav-item" type="button"><span>🔔</span><small>Alerts</small></button>
             <form method="post" action="{{ url_for('logout') }}" class="mobile-nav-form">
@@ -192,60 +203,189 @@
     </main>
 </div>
 
-<div id="profile-modal" class="profile-modal hidden" role="dialog" aria-modal="true" aria-labelledby="profile-modal-title">
-    <div class="profile-modal-card">
-        <button id="close-profile-modal" class="profile-modal-close" type="button" title="Close" aria-label="Close profile settings">✕</button>
-        <div class="profile-modal-heading">
-            <span class="eyebrow">Messenger-style profile</span>
-            <h2 id="profile-modal-title">Your profile</h2>
-            <p>Choose a picture and add a short note for your friends.</p>
-        </div>
+<div id="app-menu-overlay" class="app-menu-overlay hidden" aria-hidden="true">
+    <aside id="app-menu-panel" class="app-menu-panel" role="dialog" aria-modal="true" aria-labelledby="app-menu-title">
+        <header class="app-menu-header">
+            <div>
+                <span class="eyebrow">GChats menu</span>
+                <h2 id="app-menu-title">Menu</h2>
+            </div>
+            <button id="close-app-menu" class="app-menu-close" type="button" aria-label="Close menu">✕</button>
+        </header>
 
-        <section class="profile-picture-section" aria-label="Profile picture">
-            <div id="profile-modal-avatar" class="profile-modal-avatar">KF</div>
+        <button id="menu-create-group" class="app-menu-item" type="button">
+            <span class="app-menu-item-icon">👥</span>
+            <span><strong>Create group chat</strong><small>Start a new GC with your friends</small></span>
+            <span class="app-menu-chevron">›</span>
+        </button>
+
+        <button id="menu-settings-toggle" class="app-menu-item" type="button" aria-expanded="false" aria-controls="menu-settings-section">
+            <span class="app-menu-item-icon">⚙</span>
+            <span><strong>Settings</strong><small>Change the app appearance</small></span>
+            <span id="settings-chevron" class="app-menu-chevron">›</span>
+        </button>
+
+        <section id="menu-settings-section" class="menu-settings-section hidden" aria-label="Appearance settings">
+            <div class="menu-setting-heading">Appearance</div>
+            <div class="theme-choice-grid">
+                <button class="theme-choice" data-theme-choice="dark" type="button">
+                    <span class="theme-preview dark-preview">☾</span>
+                    <span><strong>Dark mode</strong><small>Black Messenger style</small></span>
+                    <span class="theme-check">✓</span>
+                </button>
+                <button class="theme-choice" data-theme-choice="light" type="button">
+                    <span class="theme-preview light-preview">☀</span>
+                    <span><strong>Light mode</strong><small>Bright Messenger style</small></span>
+                    <span class="theme-check">✓</span>
+                </button>
+            </div>
+        </section>
+    </aside>
+</div>
+
+<div id="new-group-modal" class="profile-modal hidden" role="dialog" aria-modal="true" aria-labelledby="new-group-title">
+    <div class="profile-modal-card group-create-card">
+        <button id="close-group-modal" class="profile-modal-close" type="button">✕</button>
+        <div class="profile-modal-heading"><span class="eyebrow">New conversation</span><h2 id="new-group-title">Create group chat</h2><p>Name the group and select friends.</p></div>
+        <label class="group-name-label" for="group-name-input">Group name</label>
+        <input id="group-name-input" class="group-name-input" type="text" maxlength="60" placeholder="Example: Gaming Squad">
+        <label class="group-name-label group-member-search-label" for="group-member-search">Add friends</label>
+        <div class="group-member-search-wrap">
+            <span aria-hidden="true">⌕</span>
+            <input id="group-member-search" type="search" placeholder="Search username" autocomplete="off">
+        </div>
+        <div class="group-selection-summary"><strong id="group-selected-count">0</strong> selected</div>
+        <div id="group-member-options" class="group-member-options"></div>
+        <div id="group-create-status" class="profile-status" role="status"></div>
+        <button id="create-group-button" class="button button-primary group-create-submit" type="button">Create group</button>
+    </div>
+</div>
+
+<div id="group-members-modal" class="profile-modal group-members-modal hidden" role="dialog" aria-modal="true" aria-labelledby="group-members-title">
+    <div class="profile-modal-card group-members-card">
+        <button id="back-group-members" class="modal-back-button" type="button" aria-label="Back">‹</button>
+        <div class="profile-modal-heading group-members-heading">
+            <span class="eyebrow">Group settings</span>
+            <h2 id="group-members-title">Members</h2>
+            <p id="group-members-summary">People in this conversation</p>
+        </div>
+        <div id="group-members-list" class="group-members-list"></div>
+    </div>
+</div>
+
+<div id="leave-group-modal" class="profile-modal leave-group-modal hidden" role="dialog" aria-modal="true" aria-labelledby="leave-group-title">
+    <div class="profile-modal-card leave-group-card">
+        <button id="close-leave-group-modal" class="profile-modal-close" type="button" aria-label="Close">✕</button>
+        <div class="leave-group-icon">↪</div>
+        <div class="profile-modal-heading leave-group-heading">
+            <h2 id="leave-group-title">Leave this group?</h2>
+            <p>You will stop receiving new messages. The conversation stays visible to the remaining members.</p>
+        </div>
+        <div id="leave-group-status" class="profile-status" role="status"></div>
+        <div class="leave-group-actions">
+            <button id="cancel-leave-group" class="button button-secondary" type="button">Cancel</button>
+            <button id="confirm-leave-group" class="button button-danger" type="button">Leave group</button>
+        </div>
+    </div>
+</div>
+
+<div id="group-profile-modal" class="profile-modal hidden" role="dialog" aria-modal="true" aria-labelledby="group-profile-modal-title">
+    <div class="profile-modal-card group-profile-card">
+        <button id="close-group-profile-modal" class="profile-modal-close" type="button">✕</button>
+        <div class="profile-modal-heading">
+            <span class="eyebrow">Group chat settings</span>
+            <h2 id="group-profile-modal-title">Edit group chat</h2>
+            <p>Every member can update the group name and picture.</p>
+        </div>
+        <section class="profile-picture-section group-picture-section">
+            <div id="group-profile-avatar" class="profile-modal-avatar">GC</div>
             <div class="profile-picture-actions">
-                <strong id="profile-modal-username"></strong>
-                <span>JPG, PNG, GIF, or WEBP · max <span id="profile-picture-limit">5</span> MB</span>
+                <strong>Group picture</strong>
+                <span>JPG, PNG, GIF, or WEBP · max <span id="group-picture-limit">5</span> MB</span>
                 <div>
-                    <button id="choose-profile-picture" class="button button-primary" type="button">Choose picture</button>
-                    <button id="remove-profile-picture" class="button button-secondary" type="button">Remove</button>
+                    <button id="choose-group-picture" class="button button-primary" type="button">Choose picture</button>
+                    <button id="remove-group-picture" class="button button-secondary" type="button">Remove</button>
                 </div>
             </div>
+            <input id="group-picture-input" class="hidden-file-input" type="file" accept="image/jpeg,image/png,image/gif,image/webp">
+        </section>
+        <section class="profile-note-section group-name-settings">
+            <label for="edit-group-name-input">Group name</label>
+            <div class="profile-note-input-wrap">
+                <input id="edit-group-name-input" type="text" maxlength="60" placeholder="Group chat name">
+                <span><strong id="edit-group-name-count">0</strong>/60</span>
+            </div>
+        </section>
+        <div id="group-profile-status" class="profile-status" role="status"></div>
+        <button id="save-group-profile" class="button button-primary group-profile-save" type="button">Save changes</button>
+    </div>
+</div>
+
+<div id="profile-modal" class="profile-modal hidden" role="dialog" aria-modal="true" aria-labelledby="profile-modal-title">
+    <div class="profile-modal-card">
+        <button id="close-profile-modal" class="profile-modal-close" type="button">✕</button>
+        <div class="profile-modal-heading"><span class="eyebrow">Messenger-style profile</span><h2 id="profile-modal-title">Your profile</h2><p>Choose a picture and add a short note for your friends.</p></div>
+        <section class="profile-picture-section">
+            <div id="profile-modal-avatar" class="profile-modal-avatar">GC</div>
+            <div class="profile-picture-actions"><strong id="profile-modal-username"></strong><span>JPG, PNG, GIF, or WEBP · max <span id="profile-picture-limit">5</span> MB</span><div><button id="choose-profile-picture" class="button button-primary" type="button">Choose picture</button><button id="remove-profile-picture" class="button button-secondary" type="button">Remove</button></div></div>
             <input id="profile-picture-input" class="hidden-file-input" type="file" accept="image/jpeg,image/png,image/gif,image/webp">
         </section>
-
-        <section class="profile-note-section" aria-label="Profile note">
-            <label for="profile-note-input">Your note</label>
-            <div class="profile-note-input-wrap">
-                <input id="profile-note-input" type="text" maxlength="60" placeholder="Share what is on your mind…" autocomplete="off">
-                <span><strong id="profile-note-count">0</strong>/60</span>
+        <section class="profile-note-section profile-bio-section">
+            <label for="profile-bio-input">Bio</label>
+            <div class="profile-bio-input-wrap">
+                <textarea id="profile-bio-input" rows="3" maxlength="160" placeholder="Tell your friends about yourself…"></textarea>
+                <span><strong id="profile-bio-count">0</strong>/160</span>
             </div>
-            <p>Friends see this note above your picture. It automatically disappears after 24 hours.</p>
+            <p>Your bio stays on your profile until you change or clear it.</p>
             <div class="profile-note-actions">
-                <button id="save-profile-note" class="button button-primary" type="button">Share note</button>
-                <button id="clear-profile-note" class="button button-secondary" type="button">Clear note</button>
+                <button id="save-profile-bio" class="button button-primary" type="button">Save bio</button>
+                <button id="clear-profile-bio" class="button button-secondary" type="button">Clear bio</button>
             </div>
         </section>
-
-        <div id="profile-status" class="profile-status" role="status" aria-live="polite"></div>
+        <section class="profile-note-section">
+            <label for="profile-note-input">Your note</label>
+            <div class="profile-note-input-wrap"><input id="profile-note-input" type="text" maxlength="60" placeholder="Share what is on your mind…"><span><strong id="profile-note-count">0</strong>/60</span></div>
+            <p>Friends see this note above your picture. It disappears after 24 hours.</p>
+            <div class="profile-note-actions"><button id="save-profile-note" class="button button-primary" type="button">Share note</button><button id="clear-profile-note" class="button button-secondary" type="button">Clear note</button></div>
+        </section>
+        <div id="profile-status" class="profile-status" role="status"></div>
     </div>
 </div>
 
-<div id="incoming-call" class="incoming-call hidden" role="dialog" aria-modal="true" aria-labelledby="incoming-call-title">
-    <div class="incoming-call-card">
-        <div id="incoming-call-icon" class="incoming-call-icon">☎</div>
-        <h2 id="incoming-call-title">Incoming group call</h2>
-        <p id="incoming-call-text">A friend started a call.</p>
-        <div class="incoming-call-actions">
-            <button id="decline-call-button" class="incoming-action decline" type="button">✕<span>Decline</span></button>
-            <button id="accept-call-button" class="incoming-action accept" type="button">✓<span>Accept</span></button>
+<div id="user-profile-modal" class="profile-modal user-profile-modal hidden" role="dialog" aria-modal="true" aria-labelledby="user-profile-name">
+    <div class="profile-modal-card user-profile-card">
+        <button id="back-user-profile" class="modal-back-button" type="button" aria-label="Back">‹</button>
+        <div class="user-profile-hero">
+            <button id="user-profile-picture" class="user-profile-picture" type="button" title="View profile picture" aria-label="View profile picture">GC</button>
+            <h2 id="user-profile-name">Friend</h2>
+            <p id="user-profile-presence">Offline</p>
+            <div id="user-profile-note" class="user-profile-note hidden"></div>
         </div>
+        <section class="user-profile-details">
+            <span class="eyebrow">Bio</span>
+            <p id="user-profile-bio">No bio yet.</p>
+        </section>
+        <button id="user-profile-message-button" class="button button-primary user-profile-message-button" type="button">Message</button>
     </div>
 </div>
 
-<script>
-    window.APP_DATA = {{ app_data | tojson }};
-</script>
+<div id="media-viewer-modal" class="media-viewer-modal hidden" role="dialog" aria-modal="true" aria-labelledby="media-viewer-title">
+    <header class="media-viewer-header">
+        <button id="media-viewer-back" class="media-viewer-back" type="button" aria-label="Back">‹</button>
+        <div>
+            <strong id="media-viewer-title">Picture</strong>
+            <span id="media-viewer-subtitle"></span>
+        </div>
+        <a id="media-viewer-download" class="media-viewer-download" href="#" aria-label="Download attachment">↓ <span>Download</span></a>
+    </header>
+    <div id="media-viewer-stage" class="media-viewer-stage"></div>
+</div>
+
+<div id="incoming-call" class="incoming-call hidden" role="dialog" aria-modal="true">
+    <div class="incoming-call-card"><div id="incoming-call-icon" class="incoming-call-icon">☎</div><h2 id="incoming-call-title">Incoming call</h2><p id="incoming-call-text">A friend started a call.</p><div class="incoming-call-actions"><button id="decline-call-button" class="incoming-action decline" type="button">✕<span>Decline</span></button><button id="accept-call-button" class="incoming-action accept" type="button">✓<span>Accept</span></button></div></div>
+</div>
+
+<script>window.APP_DATA = {{ app_data | tojson }};</script>
 <script src="https://cdn.socket.io/4.8.1/socket.io.min.js"></script>
 <script src="{{ url_for('static', filename='js/group.js') }}"></script>
 {% endblock %}

@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import hmac
 import json
+import mimetypes
 import os
 import re
 import secrets
 import sqlite3
 import threading
 import uuid
+from io import BytesIO
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
@@ -26,6 +30,7 @@ from flask import (
     redirect,
     render_template,
     request,
+    send_file,
     send_from_directory,
     session,
     url_for,
@@ -59,6 +64,8 @@ UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", str(BASE_DIR / "instance" / "uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 PROFILE_UPLOAD_DIR = UPLOAD_DIR / "profiles"
 PROFILE_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+GROUP_UPLOAD_DIR = UPLOAD_DIR / "groups"
+GROUP_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 MAX_UPLOAD_MB = max(1, get_int_env("MAX_UPLOAD_MB", 25))
 PROFILE_MAX_UPLOAD_MB = max(1, min(10, get_int_env("PROFILE_MAX_UPLOAD_MB", 5)))
 HISTORY_PAGE_SIZE = max(20, min(100, get_int_env("HISTORY_PAGE_SIZE", 50)))
@@ -68,8 +75,8 @@ USE_CLOUDINARY = bool(CLOUDINARY_URL)
 if USE_CLOUDINARY:
     cloudinary.config(secure=True)
 
-GROUP_ROOM = "friends-group"
-CALL_ROOM = "friends-call"
+GLOBAL_ROOM = "all-users"
+DEFAULT_GROUP_NAME = os.getenv("DEFAULT_GROUP_NAME", "Kulot Friends").strip() or "Kulot Friends"
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{3,24}$")
 ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".webm", ".ogg", ".mov", ".m4v"}
@@ -89,11 +96,13 @@ app.config.update(
 # Threading mode is simple and compatible with Gunicorn's threaded worker.
 socketio = SocketIO(app, async_mode="threading")
 
-state_lock = threading.Lock()
+state_lock = threading.RLock()
 sid_to_username: dict[str, str] = {}
+sid_to_user_id: dict[str, int] = {}
 username_to_sids: dict[str, set[str]] = {}
-call_participants: dict[str, str] = {}
-active_call: dict[str, str] | None = None
+active_calls: dict[int, dict[str, str]] = {}
+call_participants: dict[int, dict[str, str]] = {}
+sid_call_conversation: dict[str, int] = {}
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -151,11 +160,36 @@ def init_sqlite_db() -> None:
                 profile_picture_url TEXT,
                 profile_picture_public_id TEXT,
                 note_text TEXT,
-                note_expires_at TEXT
+                note_expires_at TEXT,
+                bio_text TEXT,
+                last_seen_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS conversations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT,
+                profile_picture_url TEXT,
+                profile_picture_public_id TEXT,
+                conversation_type TEXT NOT NULL,
+                created_by INTEGER,
+                created_at TEXT NOT NULL,
+                direct_key TEXT,
+                is_default INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS conversation_members (
+                conversation_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                joined_at TEXT NOT NULL,
+                PRIMARY KEY (conversation_id, user_id),
+                FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             );
 
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_id INTEGER,
                 user_id INTEGER NOT NULL,
                 body TEXT NOT NULL DEFAULT '',
                 sent_at TEXT NOT NULL,
@@ -164,6 +198,7 @@ def init_sqlite_db() -> None:
                 attachment_name TEXT,
                 attachment_mime TEXT,
                 reply_to_id INTEGER,
+                FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
                 FOREIGN KEY (reply_to_id) REFERENCES messages(id) ON DELETE SET NULL
             );
@@ -178,30 +213,46 @@ def init_sqlite_db() -> None:
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             );
 
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_direct_key
+                ON conversations(direct_key) WHERE direct_key IS NOT NULL;
+            CREATE INDEX IF NOT EXISTS idx_conversation_members_user
+                ON conversation_members(user_id);
             CREATE INDEX IF NOT EXISTS idx_messages_sent_at ON messages(sent_at);
             CREATE INDEX IF NOT EXISTS idx_reactions_message ON message_reactions(message_id);
             """
         )
 
         existing_user_columns = {
-            str(row["name"])
-            for row in db.execute("PRAGMA table_info(users)").fetchall()
+            str(row["name"]) for row in db.execute("PRAGMA table_info(users)").fetchall()
         }
         user_migrations = {
             "profile_picture_url": "ALTER TABLE users ADD COLUMN profile_picture_url TEXT",
             "profile_picture_public_id": "ALTER TABLE users ADD COLUMN profile_picture_public_id TEXT",
             "note_text": "ALTER TABLE users ADD COLUMN note_text TEXT",
             "note_expires_at": "ALTER TABLE users ADD COLUMN note_expires_at TEXT",
+            "bio_text": "ALTER TABLE users ADD COLUMN bio_text TEXT",
+            "last_seen_at": "ALTER TABLE users ADD COLUMN last_seen_at TEXT",
         }
         for column_name, statement in user_migrations.items():
             if column_name not in existing_user_columns:
                 db.execute(statement)
 
+        existing_conversation_columns = {
+            str(row["name"]) for row in db.execute("PRAGMA table_info(conversations)").fetchall()
+        }
+        conversation_migrations = {
+            "profile_picture_url": "ALTER TABLE conversations ADD COLUMN profile_picture_url TEXT",
+            "profile_picture_public_id": "ALTER TABLE conversations ADD COLUMN profile_picture_public_id TEXT",
+        }
+        for column_name, statement in conversation_migrations.items():
+            if column_name not in existing_conversation_columns:
+                db.execute(statement)
+
         existing_columns = {
-            str(row["name"])
-            for row in db.execute("PRAGMA table_info(messages)").fetchall()
+            str(row["name"]) for row in db.execute("PRAGMA table_info(messages)").fetchall()
         }
         migrations = {
+            "conversation_id": "ALTER TABLE messages ADD COLUMN conversation_id INTEGER",
             "message_type": "ALTER TABLE messages ADD COLUMN message_type TEXT NOT NULL DEFAULT 'text'",
             "attachment_url": "ALTER TABLE messages ADD COLUMN attachment_url TEXT",
             "attachment_name": "ALTER TABLE messages ADD COLUMN attachment_name TEXT",
@@ -211,6 +262,13 @@ def init_sqlite_db() -> None:
         for column_name, statement in migrations.items():
             if column_name not in existing_columns:
                 db.execute(statement)
+
+        db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_messages_conversation_id
+            ON messages(conversation_id, id)
+            """
+        )
 
 
 def init_postgres_db() -> None:
@@ -224,7 +282,9 @@ def init_postgres_db() -> None:
             profile_picture_url TEXT,
             profile_picture_public_id TEXT,
             note_text TEXT,
-            note_expires_at TEXT
+            note_expires_at TEXT,
+            bio_text TEXT,
+            last_seen_at TEXT
         )
         """,
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_lower ON users (LOWER(username))",
@@ -232,9 +292,36 @@ def init_postgres_db() -> None:
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_picture_public_id TEXT",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS note_text TEXT",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS note_expires_at TEXT",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS bio_text TEXT",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen_at TEXT",
+        """
+        CREATE TABLE IF NOT EXISTS conversations (
+            id BIGSERIAL PRIMARY KEY,
+            name TEXT,
+            profile_picture_url TEXT,
+            profile_picture_public_id TEXT,
+            conversation_type TEXT NOT NULL,
+            created_by BIGINT REFERENCES users(id) ON DELETE SET NULL,
+            created_at TEXT NOT NULL,
+            direct_key TEXT,
+            is_default BOOLEAN NOT NULL DEFAULT FALSE
+        )
+        """,
+        "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS profile_picture_url TEXT",
+        "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS profile_picture_public_id TEXT",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_direct_key ON conversations(direct_key) WHERE direct_key IS NOT NULL",
+        """
+        CREATE TABLE IF NOT EXISTS conversation_members (
+            conversation_id BIGINT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+            user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            joined_at TEXT NOT NULL,
+            PRIMARY KEY (conversation_id, user_id)
+        )
+        """,
         """
         CREATE TABLE IF NOT EXISTS messages (
             id BIGSERIAL PRIMARY KEY,
+            conversation_id BIGINT REFERENCES conversations(id) ON DELETE CASCADE,
             user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             body TEXT NOT NULL DEFAULT '',
             sent_at TEXT NOT NULL,
@@ -254,11 +341,14 @@ def init_postgres_db() -> None:
             PRIMARY KEY (message_id, user_id)
         )
         """,
+        "ALTER TABLE messages ADD COLUMN IF NOT EXISTS conversation_id BIGINT",
         "ALTER TABLE messages ADD COLUMN IF NOT EXISTS message_type TEXT NOT NULL DEFAULT 'text'",
         "ALTER TABLE messages ADD COLUMN IF NOT EXISTS attachment_url TEXT",
         "ALTER TABLE messages ADD COLUMN IF NOT EXISTS attachment_name TEXT",
         "ALTER TABLE messages ADD COLUMN IF NOT EXISTS attachment_mime TEXT",
         "ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_to_id BIGINT REFERENCES messages(id) ON DELETE SET NULL",
+        "CREATE INDEX IF NOT EXISTS idx_conversation_members_user ON conversation_members(user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id, id)",
         "CREATE INDEX IF NOT EXISTS idx_messages_sent_at ON messages(sent_at)",
         "CREATE INDEX IF NOT EXISTS idx_reactions_message ON message_reactions(message_id)",
     ]
@@ -275,6 +365,16 @@ def init_db() -> None:
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def touch_last_seen(user_id: int, seen_at: str | None = None) -> None:
+    """Persist the user's most recent activity time for offline status."""
+    with db_connect() as db:
+        db_execute(
+            db,
+            "UPDATE users SET last_seen_at = ? WHERE id = ?",
+            (seen_at or utc_now(), user_id),
+        )
 
 
 def csrf_token() -> str:
@@ -313,7 +413,7 @@ def current_user() -> DbRow | None:
             db,
             """
             SELECT id, username, created_at, profile_picture_url,
-                   profile_picture_public_id, note_text, note_expires_at
+                   profile_picture_public_id, note_text, note_expires_at, bio_text, last_seen_at
             FROM users WHERE id = ?
             """,
             (user_id,),
@@ -334,12 +434,17 @@ def note_is_active(expires_at: Any) -> bool:
 
 def profile_payload(row: DbRow) -> dict[str, Any]:
     active_note = str(row["note_text"] or "").strip() if note_is_active(row["note_expires_at"]) else ""
-    return {
+    payload = {
         "username": str(row["username"]),
         "profile_picture_url": row["profile_picture_url"],
         "note": active_note,
         "note_expires_at": row["note_expires_at"] if active_note else None,
+        "bio": str(row["bio_text"] or "").strip() if "bio_text" in row.keys() else "",
+        "last_seen_at": row["last_seen_at"] if "last_seen_at" in row.keys() else None,
     }
+    if "id" in row.keys():
+        payload["id"] = int(row["id"])
+    return payload
 
 
 def all_members() -> list[dict[str, Any]]:
@@ -347,11 +452,306 @@ def all_members() -> list[dict[str, Any]]:
         rows = db_execute(
             db,
             """
-            SELECT username, profile_picture_url, note_text, note_expires_at
+            SELECT id, username, profile_picture_url, note_text, note_expires_at, bio_text, last_seen_at
             FROM users ORDER BY LOWER(username)
             """,
         ).fetchall()
-    return [profile_payload(row) for row in rows]
+    return [{**profile_payload(row), "id": int(row["id"])} for row in rows]
+
+
+def conversation_room(conversation_id: int) -> str:
+    return f"conversation:{conversation_id}"
+
+
+def call_room(conversation_id: int) -> str:
+    return f"call:{conversation_id}"
+
+
+def ensure_default_conversation() -> int:
+    """Create the original shared group and migrate old one-room messages into it."""
+    with db_connect() as db:
+        row = db_execute(
+            db,
+            "SELECT id FROM conversations WHERE is_default = ? ORDER BY id LIMIT 1",
+            (True if USE_POSTGRES else 1,),
+        ).fetchone()
+        if row:
+            conversation_id = int(row["id"])
+        else:
+            first_user = db_execute(db, "SELECT id FROM users ORDER BY id LIMIT 1").fetchone()
+            creator_id = int(first_user["id"]) if first_user else None
+            conversation_id = insert_and_get_id(
+                db,
+                """
+                INSERT INTO conversations (name, conversation_type, created_by, created_at, is_default)
+                VALUES (?, 'group', ?, ?, ?)
+                """,
+                (DEFAULT_GROUP_NAME, creator_id, utc_now(), True if USE_POSTGRES else 1),
+            )
+
+        users = db_execute(db, "SELECT id FROM users").fetchall()
+        for user in users:
+            if USE_POSTGRES:
+                db_execute(
+                    db,
+                    """
+                    INSERT INTO conversation_members (conversation_id, user_id, joined_at)
+                    VALUES (?, ?, ?) ON CONFLICT (conversation_id, user_id) DO NOTHING
+                    """,
+                    (conversation_id, int(user["id"]), utc_now()),
+                )
+            else:
+                db_execute(
+                    db,
+                    """
+                    INSERT OR IGNORE INTO conversation_members (conversation_id, user_id, joined_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    (conversation_id, int(user["id"]), utc_now()),
+                )
+
+        db_execute(
+            db,
+            "UPDATE messages SET conversation_id = ? WHERE conversation_id IS NULL",
+            (conversation_id,),
+        )
+    return conversation_id
+
+
+def add_user_to_default_conversation(user_id: int) -> int:
+    conversation_id = ensure_default_conversation()
+    with db_connect() as db:
+        if USE_POSTGRES:
+            db_execute(
+                db,
+                """
+                INSERT INTO conversation_members (conversation_id, user_id, joined_at)
+                VALUES (?, ?, ?) ON CONFLICT (conversation_id, user_id) DO NOTHING
+                """,
+                (conversation_id, user_id, utc_now()),
+            )
+        else:
+            db_execute(
+                db,
+                """
+                INSERT OR IGNORE INTO conversation_members (conversation_id, user_id, joined_at)
+                VALUES (?, ?, ?)
+                """,
+                (conversation_id, user_id, utc_now()),
+            )
+    return conversation_id
+
+
+def user_conversation_ids(user_id: int) -> list[int]:
+    with db_connect() as db:
+        rows = db_execute(
+            db,
+            "SELECT conversation_id FROM conversation_members WHERE user_id = ?",
+            (user_id,),
+        ).fetchall()
+    return [int(row["conversation_id"]) for row in rows]
+
+
+def is_conversation_member(conversation_id: int, user_id: int) -> bool:
+    with db_connect() as db:
+        row = db_execute(
+            db,
+            """
+            SELECT 1 AS found FROM conversation_members
+            WHERE conversation_id = ? AND user_id = ?
+            """,
+            (conversation_id, user_id),
+        ).fetchone()
+    return bool(row)
+
+
+def conversation_member_profiles(conversation_id: int) -> list[dict[str, Any]]:
+    with db_connect() as db:
+        rows = db_execute(
+            db,
+            """
+            SELECT users.id, users.username, users.profile_picture_url,
+                   users.note_text, users.note_expires_at, users.bio_text, users.last_seen_at
+            FROM conversation_members
+            JOIN users ON users.id = conversation_members.user_id
+            WHERE conversation_members.conversation_id = ?
+            ORDER BY LOWER(users.username)
+            """,
+            (conversation_id,),
+        ).fetchall()
+    return [{**profile_payload(row), "id": int(row["id"])} for row in rows]
+
+
+def conversation_payload(conversation_id: int, viewer_id: int) -> dict[str, Any] | None:
+    if not is_conversation_member(conversation_id, viewer_id):
+        return None
+    with db_connect() as db:
+        conversation = db_execute(
+            db,
+            """
+            SELECT id, name, profile_picture_url, conversation_type, created_by, created_at, is_default
+            FROM conversations WHERE id = ?
+            """,
+            (conversation_id,),
+        ).fetchone()
+    if not conversation:
+        return None
+
+    members = conversation_member_profiles(conversation_id)
+    conversation_type = str(conversation["conversation_type"])
+    if conversation_type == "direct":
+        other = next((member for member in members if int(member["id"]) != viewer_id), None)
+        title = str(other["username"]) if other else "Private chat"
+        avatar_url = other.get("profile_picture_url") if other else None
+    else:
+        title = str(conversation["name"] or "Group chat")
+        avatar_url = conversation["profile_picture_url"]
+
+    return {
+        "id": int(conversation["id"]),
+        "name": title,
+        "type": conversation_type,
+        "avatar_url": avatar_url,
+        "member_count": len(members),
+        "members": members,
+        "is_default": bool(conversation["is_default"]),
+        "can_edit": conversation_type == "group",
+    }
+
+
+def conversation_summaries(user_id: int) -> list[dict[str, Any]]:
+    conversation_ids = user_conversation_ids(user_id)
+    summaries: list[dict[str, Any]] = []
+    with db_connect() as db:
+        for conversation_id in conversation_ids:
+            payload = conversation_payload(conversation_id, user_id)
+            if not payload:
+                continue
+            last = db_execute(
+                db,
+                """
+                SELECT messages.id, messages.body, messages.sent_at, messages.message_type,
+                       messages.attachment_name, users.username
+                FROM messages
+                JOIN users ON users.id = messages.user_id
+                WHERE messages.conversation_id = ?
+                ORDER BY messages.id DESC LIMIT 1
+                """,
+                (conversation_id,),
+            ).fetchone()
+            if last:
+                body = str(last["body"] or "").strip()
+                if not body:
+                    if str(last["message_type"]) == "image":
+                        body = "sent a photo"
+                    elif str(last["message_type"]) == "video":
+                        body = "sent a video"
+                    else:
+                        body = "sent an attachment"
+                payload.update(
+                    {
+                        "last_message_id": int(last["id"]),
+                        "last_message": body[:90],
+                        "last_sender": str(last["username"]),
+                        "last_sent_at": str(last["sent_at"]),
+                    }
+                )
+            else:
+                payload.update(
+                    {
+                        "last_message_id": 0,
+                        "last_message": "Start a conversation",
+                        "last_sender": "",
+                        "last_sent_at": "",
+                    }
+                )
+            summaries.append(payload)
+
+    summaries.sort(key=lambda item: int(item.get("last_message_id", 0)), reverse=True)
+    return summaries
+
+
+def get_or_create_direct_conversation(user_id: int, other_user_id: int) -> int:
+    if user_id == other_user_id:
+        raise ValueError("You cannot create a private chat with yourself.")
+    low, high = sorted((user_id, other_user_id))
+    direct_key = f"{low}:{high}"
+    with db_connect() as db:
+        other = db_execute(db, "SELECT id FROM users WHERE id = ?", (other_user_id,)).fetchone()
+        if not other:
+            raise LookupError("User not found.")
+        existing = db_execute(
+            db, "SELECT id FROM conversations WHERE direct_key = ?", (direct_key,)
+        ).fetchone()
+        if existing:
+            return int(existing["id"])
+        try:
+            conversation_id = insert_and_get_id(
+                db,
+                """
+                INSERT INTO conversations
+                    (name, conversation_type, created_by, created_at, direct_key, is_default)
+                VALUES (NULL, 'direct', ?, ?, ?, ?)
+                """,
+                (user_id, utc_now(), direct_key, False if USE_POSTGRES else 0),
+            )
+        except (sqlite3.IntegrityError, psycopg.IntegrityError):
+            existing = db_execute(
+                db, "SELECT id FROM conversations WHERE direct_key = ?", (direct_key,)
+            ).fetchone()
+            if not existing:
+                raise
+            return int(existing["id"])
+
+        for member_id in (user_id, other_user_id):
+            db_execute(
+                db,
+                """
+                INSERT INTO conversation_members (conversation_id, user_id, joined_at)
+                VALUES (?, ?, ?)
+                """,
+                (conversation_id, member_id, utc_now()),
+            )
+    return conversation_id
+
+
+def create_group_conversation(owner_id: int, name: str, member_ids: list[int]) -> int:
+    clean_name = name.strip()
+    if not 1 <= len(clean_name) <= 60:
+        raise ValueError("Group name must be 1–60 characters.")
+    unique_members = sorted(set(member_ids + [owner_id]))
+    if len(unique_members) < 2:
+        raise ValueError("Choose at least one friend for the group chat.")
+    if len(unique_members) > 50:
+        raise ValueError("A group chat can have up to 50 members.")
+
+    with db_connect() as db:
+        placeholders = ",".join("?" for _ in unique_members)
+        rows = db_execute(
+            db, f"SELECT id FROM users WHERE id IN ({placeholders})", tuple(unique_members)
+        ).fetchall()
+        valid_ids = {int(row["id"]) for row in rows}
+        if valid_ids != set(unique_members):
+            raise LookupError("One or more selected users no longer exist.")
+        conversation_id = insert_and_get_id(
+            db,
+            """
+            INSERT INTO conversations
+                (name, conversation_type, created_by, created_at, direct_key, is_default)
+            VALUES (?, 'group', ?, ?, NULL, ?)
+            """,
+            (clean_name, owner_id, utc_now(), False if USE_POSTGRES else 0),
+        )
+        for member_id in unique_members:
+            db_execute(
+                db,
+                """
+                INSERT INTO conversation_members (conversation_id, user_id, joined_at)
+                VALUES (?, ?, ?)
+                """,
+                (conversation_id, member_id, utc_now()),
+            )
+    return conversation_id
 
 
 def reaction_summaries(message_ids: list[int]) -> dict[int, list[dict[str, Any]]]:
@@ -400,18 +800,20 @@ def reply_preview_from_row(row: DbRow) -> dict[str, Any] | None:
 
 
 def messages_before(
+    conversation_id: int,
     before_id: int | None = None,
     limit: int = HISTORY_PAGE_SIZE,
 ) -> list[dict[str, Any]]:
     safe_limit = max(1, min(100, int(limit)))
-    where_clause = "WHERE messages.id < ?" if before_id else ""
-    params: tuple[Any, ...] = (before_id, safe_limit) if before_id else (safe_limit,)
+    extra = " AND messages.id < ?" if before_id else ""
+    params: tuple[Any, ...] = (conversation_id, before_id, safe_limit) if before_id else (conversation_id, safe_limit)
 
     with db_connect() as db:
         rows = db_execute(
             db,
             f"""
-            SELECT messages.id, users.username, users.profile_picture_url, messages.body, messages.sent_at,
+            SELECT messages.id, messages.conversation_id, users.username,
+                   users.profile_picture_url, messages.body, messages.sent_at,
                    messages.message_type, messages.attachment_url,
                    messages.attachment_name, messages.attachment_mime,
                    messages.reply_to_id, reply_users.username AS reply_username,
@@ -421,7 +823,7 @@ def messages_before(
             JOIN users ON users.id = messages.user_id
             LEFT JOIN messages AS replied ON replied.id = messages.reply_to_id
             LEFT JOIN users AS reply_users ON reply_users.id = replied.user_id
-            {where_clause}
+            WHERE messages.conversation_id = ?{extra}
             ORDER BY messages.id DESC
             LIMIT ?
             """,
@@ -433,6 +835,7 @@ def messages_before(
     return [
         message_payload(
             int(row["id"]),
+            int(row["conversation_id"]),
             str(row["username"]),
             str(row["body"]),
             str(row["sent_at"]),
@@ -448,25 +851,22 @@ def messages_before(
     ]
 
 
-def has_messages_before(message_id: int | None) -> bool:
+def has_messages_before(conversation_id: int, message_id: int | None) -> bool:
     if not message_id:
         return False
     with db_connect() as db:
         row = db_execute(
             db,
-            "SELECT 1 AS found FROM messages WHERE id < ? LIMIT 1",
-            (message_id,),
+            """
+            SELECT 1 AS found FROM messages
+            WHERE conversation_id = ? AND id < ? LIMIT 1
+            """,
+            (conversation_id, message_id),
         ).fetchone()
     return bool(row)
 
 
 def public_ice_servers() -> list[dict[str, Any]]:
-    """Return WebRTC ICE servers sent to browsers.
-
-    ICE_SERVERS_JSON can contain a JSON list, for example:
-    [{"urls":"stun:stun.example.com:3478"},
-     {"urls":"turn:turn.example.com:3478","username":"u","credential":"p"}]
-    """
     raw = os.getenv("ICE_SERVERS_JSON", "").strip()
     if raw:
         try:
@@ -480,6 +880,7 @@ def public_ice_servers() -> list[dict[str, Any]]:
 
 def message_payload(
     message_id: int,
+    conversation_id: int,
     username: str,
     body: str,
     sent_at: str,
@@ -493,6 +894,7 @@ def message_payload(
 ) -> dict[str, Any]:
     return {
         "id": message_id,
+        "conversation_id": conversation_id,
         "username": username,
         "body": body,
         "sent_at": sent_at,
@@ -506,20 +908,21 @@ def message_payload(
     }
 
 
-def get_reply_preview(reply_to_id: int | None) -> dict[str, Any] | None:
+def get_reply_preview(conversation_id: int, reply_to_id: int | None) -> dict[str, Any] | None:
     if not reply_to_id:
         return None
     with db_connect() as db:
-        row = db_execute(db, 
+        row = db_execute(
+            db,
             """
             SELECT messages.id AS reply_to_id, users.username AS reply_username,
                    messages.body AS reply_body, messages.message_type AS reply_message_type,
                    messages.attachment_name AS reply_attachment_name
             FROM messages
             JOIN users ON users.id = messages.user_id
-            WHERE messages.id = ?
+            WHERE messages.id = ? AND messages.conversation_id = ?
             """,
-            (reply_to_id,),
+            (reply_to_id, conversation_id),
         ).fetchone()
     return reply_preview_from_row(row) if row else None
 
@@ -533,6 +936,7 @@ def parse_message_id(value: Any) -> int | None:
 
 
 def save_message(
+    conversation_id: int,
     user_id: int,
     username: str,
     body: str,
@@ -543,7 +947,7 @@ def save_message(
     reply_to_id: int | None = None,
     profile_picture_url: str | None = None,
 ) -> dict[str, Any]:
-    reply_to = get_reply_preview(reply_to_id)
+    reply_to = get_reply_preview(conversation_id, reply_to_id)
     valid_reply_id = int(reply_to["id"]) if reply_to else None
     sent_at = utc_now()
     with db_connect() as db:
@@ -551,11 +955,12 @@ def save_message(
             db,
             """
             INSERT INTO messages (
-                user_id, body, sent_at, message_type, attachment_url,
+                conversation_id, user_id, body, sent_at, message_type, attachment_url,
                 attachment_name, attachment_mime, reply_to_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
+                conversation_id,
                 user_id,
                 body,
                 sent_at,
@@ -569,6 +974,7 @@ def save_message(
 
     return message_payload(
         message_id,
+        conversation_id,
         username,
         body,
         sent_at,
@@ -630,6 +1036,7 @@ def register() -> Any:
                         (username, generate_password_hash(password), utc_now()),
                     )
 
+                add_user_to_default_conversation(user_id)
                 session.clear()
                 session["user_id"] = user_id
                 session["username"] = username
@@ -666,6 +1073,7 @@ def login() -> Any:
         if not user or not check_password_hash(user["password_hash"], password):
             flash("Invalid username or password.", "error")
         else:
+            touch_last_seen(int(user["id"]))
             session.clear()
             session["user_id"] = user["id"]
             session["username"] = user["username"]
@@ -682,23 +1090,38 @@ def logout() -> Any:
     if not valid_csrf():
         flash("The form expired. Please try again.", "error")
         return redirect(url_for("chat"))
+    user_id = session.get("user_id")
+    if user_id:
+        touch_last_seen(int(user_id))
     session.clear()
     return redirect(url_for("login"))
 
 
-@app.route("/chat")
-@login_required
-def chat() -> Any:
+def render_chat_page(selected_conversation_id: int | None = None) -> Any:
     user = current_user()
     if not user:
         session.clear()
         return redirect(url_for("login"))
 
+    user_id = int(user["id"])
+    conversations = conversation_summaries(user_id)
+    selected = None
+    messages: list[dict[str, Any]] = []
+    if selected_conversation_id is not None:
+        selected = conversation_payload(selected_conversation_id, user_id)
+        if not selected:
+            flash("You are not a member of that conversation.", "error")
+            return redirect(url_for("chat"))
+        messages = messages_before(selected_conversation_id, limit=HISTORY_PAGE_SIZE)
+
     app_data = {
-        "username": user["username"],
+        "username": str(user["username"]),
+        "userId": user_id,
         "members": all_members(),
         "currentProfile": profile_payload(user),
-        "messages": messages_before(limit=HISTORY_PAGE_SIZE),
+        "conversations": conversations,
+        "selectedConversation": selected,
+        "messages": messages,
         "historyPageSize": HISTORY_PAGE_SIZE,
         "iceServers": public_ice_servers(),
         "csrfToken": csrf_token(),
@@ -708,17 +1131,86 @@ def chat() -> Any:
     return render_template("group.html", app_data=app_data)
 
 
+@app.route("/chat")
+@login_required
+def chat() -> Any:
+    return render_chat_page()
+
+
+@app.route("/chat/<int:conversation_id>")
+@login_required
+def chat_conversation(conversation_id: int) -> Any:
+    return render_chat_page(conversation_id)
+
+
 @app.route("/group")
 @login_required
 def group() -> Any:
-    # Keep old links working, but the application now opens the chat directly.
-    return redirect(url_for("chat"))
+    return redirect(url_for("chat_conversation", conversation_id=ensure_default_conversation()))
+
+
+@app.post("/api/conversations/private")
+@login_required
+def create_private_chat() -> Any:
+    expected = session.get("_csrf_token", "")
+    received = request.headers.get("X-CSRF-Token", "")
+    if not expected or not received or not hmac.compare_digest(expected, received):
+        return jsonify({"error": "The session expired. Refresh and try again."}), 403
+    data = request.get_json(silent=True) or {}
+    try:
+        other_user_id = int(data.get("user_id"))
+        conversation_id = get_or_create_direct_conversation(int(session["user_id"]), other_user_id)
+    except (TypeError, ValueError) as exc:
+        return jsonify({"error": str(exc) or "Choose a valid friend."}), 400
+    except LookupError as exc:
+        return jsonify({"error": str(exc)}), 404
+    emit_to_conversation_members(
+        "conversation_created",
+        {"conversation_id": conversation_id, "url": url_for("chat_conversation", conversation_id=conversation_id)},
+        conversation_id,
+    )
+    return jsonify({
+        "conversation_id": conversation_id,
+        "url": url_for("chat_conversation", conversation_id=conversation_id),
+    }), 201
+
+
+@app.post("/api/conversations/group")
+@login_required
+def create_group_chat() -> Any:
+    expected = session.get("_csrf_token", "")
+    received = request.headers.get("X-CSRF-Token", "")
+    if not expected or not received or not hmac.compare_digest(expected, received):
+        return jsonify({"error": "The session expired. Refresh and try again."}), 403
+    data = request.get_json(silent=True) or {}
+    name = str(data.get("name", "")).strip()
+    raw_ids = data.get("member_ids", [])
+    try:
+        member_ids = [int(value) for value in raw_ids] if isinstance(raw_ids, list) else []
+        conversation_id = create_group_conversation(int(session["user_id"]), name, member_ids)
+    except (TypeError, ValueError) as exc:
+        return jsonify({"error": str(exc) or "Check the group name and members."}), 400
+    except LookupError as exc:
+        return jsonify({"error": str(exc)}), 404
+    emit_to_conversation_members(
+        "conversation_created",
+        {"conversation_id": conversation_id, "url": url_for("chat_conversation", conversation_id=conversation_id)},
+        conversation_id,
+    )
+    return jsonify({
+        "conversation_id": conversation_id,
+        "url": url_for("chat_conversation", conversation_id=conversation_id),
+    }), 201
 
 
 @app.get("/api/messages/history")
 @login_required
 def message_history() -> Any:
+    conversation_id = parse_message_id(request.args.get("conversation_id"))
     before_id = parse_message_id(request.args.get("before_id"))
+    user_id = int(session["user_id"])
+    if not conversation_id or not is_conversation_member(conversation_id, user_id):
+        return jsonify({"error": "Conversation not found."}), 404
     if not before_id:
         return jsonify({"error": "A valid before_id is required."}), 400
 
@@ -728,13 +1220,81 @@ def message_history() -> Any:
         requested_limit = HISTORY_PAGE_SIZE
     limit = max(1, min(100, requested_limit))
 
-    messages = messages_before(before_id=before_id, limit=limit)
+    messages = messages_before(conversation_id, before_id=before_id, limit=limit)
     oldest_id = int(messages[0]["id"]) if messages else before_id
     return jsonify(
         {
             "messages": messages,
-            "has_more": has_messages_before(oldest_id),
+            "has_more": has_messages_before(conversation_id, oldest_id),
         }
+    )
+
+
+@app.get("/api/messages/<int:message_id>/download")
+@login_required
+def download_message_attachment(message_id: int) -> Any:
+    user_id = int(session["user_id"])
+    with db_connect() as db:
+        row = db_execute(
+            db,
+            """
+            SELECT messages.conversation_id, messages.message_type, messages.attachment_url,
+                   messages.attachment_name, messages.attachment_mime
+            FROM messages
+            JOIN conversation_members ON conversation_members.conversation_id = messages.conversation_id
+            WHERE messages.id = ? AND conversation_members.user_id = ?
+            """,
+            (message_id, user_id),
+        ).fetchone()
+
+    if not row or str(row["message_type"] or "") not in {"image", "video"}:
+        return jsonify({"error": "Attachment not found."}), 404
+
+    attachment_url = str(row["attachment_url"] or "").strip()
+    if not attachment_url:
+        return jsonify({"error": "Attachment not found."}), 404
+
+    original_name = secure_filename(str(row["attachment_name"] or ""))
+    guessed_extension = Path(urlparse(attachment_url).path).suffix
+    fallback_name = f"gchats-{str(row['message_type'])}-{message_id}{guessed_extension}"
+    download_name = original_name or fallback_name
+    mimetype = str(row["attachment_mime"] or "").strip() or mimetypes.guess_type(download_name)[0]
+
+    if attachment_url.startswith("/uploads/"):
+        filename = attachment_url.rsplit("/", 1)[-1]
+        return send_from_directory(
+            str(UPLOAD_DIR),
+            filename,
+            as_attachment=True,
+            download_name=download_name,
+            mimetype=mimetype,
+        )
+
+    parsed = urlparse(attachment_url)
+    if parsed.scheme != "https" or not (parsed.hostname or "").lower().endswith("res.cloudinary.com"):
+        return jsonify({"error": "This attachment cannot be downloaded safely."}), 400
+
+    try:
+        remote_request = Request(attachment_url, headers={"User-Agent": "GChats/1.0"})
+        with urlopen(remote_request, timeout=20) as remote_response:
+            content_length = int(remote_response.headers.get("Content-Length", "0") or 0)
+            max_bytes = (MAX_UPLOAD_MB + 2) * 1024 * 1024
+            if content_length and content_length > max_bytes:
+                return jsonify({"error": "This attachment is too large to download."}), 413
+            data = remote_response.read(max_bytes + 1)
+            if len(data) > max_bytes:
+                return jsonify({"error": "This attachment is too large to download."}), 413
+            remote_type = remote_response.headers.get_content_type()
+    except Exception:
+        app.logger.exception("Could not download remote attachment")
+        return jsonify({"error": "The attachment could not be downloaded right now."}), 502
+
+    return send_file(
+        BytesIO(data),
+        as_attachment=True,
+        download_name=download_name,
+        mimetype=mimetype or remote_type,
+        max_age=0,
     )
 
 
@@ -749,6 +1309,9 @@ def upload_message() -> Any:
     user = current_user()
     if not user:
         return jsonify({"error": "Please log in again."}), 401
+    conversation_id = parse_message_id(request.form.get("conversation_id"))
+    if not conversation_id or not is_conversation_member(conversation_id, int(user["id"])):
+        return jsonify({"error": "Conversation not found."}), 404
 
     uploaded = request.files.get("file")
     if not uploaded or not uploaded.filename:
@@ -763,7 +1326,6 @@ def upload_message() -> Any:
         return jsonify({"error": "Only JPG, PNG, GIF, WEBP, MP4, WEBM, OGG, MOV, and M4V files are allowed."}), 400
 
     message_type, extension = classification
-
     body = request.form.get("caption", "").strip()
     reply_to_id = parse_message_id(request.form.get("reply_to_id"))
     if len(body) > 1000:
@@ -790,7 +1352,9 @@ def upload_message() -> Any:
         destination = UPLOAD_DIR / stored_name
         uploaded.save(destination)
         attachment_url = url_for("uploaded_file", filename=stored_name)
+
     payload = save_message(
+        conversation_id,
         int(user["id"]),
         str(user["username"]),
         body,
@@ -801,7 +1365,8 @@ def upload_message() -> Any:
         reply_to_id=reply_to_id,
         profile_picture_url=user["profile_picture_url"],
     )
-    socketio.emit("new_message", payload, to=GROUP_ROOM)
+    emit_to_conversation_members("new_message", payload, conversation_id)
+    emit_to_conversation_members("conversation_updated", {"conversation_id": conversation_id}, conversation_id)
     return jsonify({"message": payload}), 201
 
 
@@ -812,7 +1377,192 @@ def valid_header_csrf() -> bool:
 
 
 def emit_profile_update(profile: dict[str, Any]) -> None:
-    socketio.emit("profile_updated", {"profile": profile}, to=GROUP_ROOM)
+    socketio.emit("profile_updated", {"profile": profile}, to=GLOBAL_ROOM)
+
+
+def remove_group_picture_file(picture_url: str, public_id: str) -> None:
+    if USE_CLOUDINARY and public_id:
+        try:
+            cloudinary.uploader.destroy(public_id, resource_type="image", invalidate=True)
+        except Exception:
+            app.logger.warning("Could not remove the old group picture from Cloudinary.")
+    elif picture_url.startswith("/group-uploads/"):
+        (GROUP_UPLOAD_DIR / picture_url.rsplit("/", 1)[-1]).unlink(missing_ok=True)
+
+
+@app.post("/api/conversations/<int:conversation_id>/profile")
+@login_required
+def update_group_conversation_profile(conversation_id: int) -> Any:
+    if not valid_header_csrf():
+        return jsonify({"error": "The group settings session expired. Refresh and try again."}), 403
+
+    user_id = int(session["user_id"])
+    if not is_conversation_member(conversation_id, user_id):
+        return jsonify({"error": "Group chat not found."}), 404
+
+    with db_connect() as db:
+        conversation = db_execute(
+            db,
+            """
+            SELECT id, name, conversation_type, profile_picture_url, profile_picture_public_id
+            FROM conversations WHERE id = ?
+            """,
+            (conversation_id,),
+        ).fetchone()
+
+    if not conversation or str(conversation["conversation_type"]) != "group":
+        return jsonify({"error": "Only group chats can have a group name and picture."}), 400
+
+    name = request.form.get("name", "").strip()
+    if not 1 <= len(name) <= 60:
+        return jsonify({"error": "Group name must be 1–60 characters."}), 400
+
+    uploaded = request.files.get("file")
+    remove_picture = request.form.get("remove_picture", "").lower() == "true"
+    old_url = str(conversation["profile_picture_url"] or "")
+    old_public_id = str(conversation["profile_picture_public_id"] or "")
+    picture_url: str | None = old_url or None
+    picture_public_id: str | None = old_public_id or None
+    replace_old_picture = False
+
+    if uploaded and uploaded.filename:
+        original_name = secure_filename(uploaded.filename)
+        classification = classify_upload(original_name, uploaded.mimetype or "")
+        if not classification or classification[0] != "image":
+            return jsonify({"error": "Group pictures must be JPG, PNG, GIF, or WEBP."}), 400
+
+        content_length = request.content_length or 0
+        if content_length > PROFILE_MAX_UPLOAD_MB * 1024 * 1024:
+            return jsonify({"error": f"Group pictures are limited to {PROFILE_MAX_UPLOAD_MB} MB."}), 413
+
+        extension = classification[1]
+        if USE_CLOUDINARY:
+            try:
+                result = cloudinary.uploader.upload(
+                    uploaded.stream,
+                    resource_type="image",
+                    folder="kulot-friends-chat/groups",
+                    public_id=f"group-{conversation_id}-{uuid.uuid4().hex}",
+                    overwrite=False,
+                    transformation=[
+                        {"width": 1024, "height": 1024, "crop": "limit", "quality": "auto"}
+                    ],
+                )
+                picture_url = str(result.get("secure_url") or "")
+                picture_public_id = str(result.get("public_id") or "") or None
+                if not picture_url:
+                    raise RuntimeError("Cloud media storage did not return a secure URL.")
+            except Exception as exc:
+                app.logger.exception("Group picture upload failed")
+                return jsonify({"error": f"Group picture upload failed: {exc}"}), 502
+        else:
+            stored_name = f"group-{conversation_id}-{uuid.uuid4().hex}{extension}"
+            uploaded.save(GROUP_UPLOAD_DIR / stored_name)
+            picture_url = url_for("group_uploaded_file", filename=stored_name)
+            picture_public_id = None
+        replace_old_picture = True
+    elif remove_picture:
+        picture_url = None
+        picture_public_id = None
+        replace_old_picture = bool(old_url or old_public_id)
+
+    with db_connect() as db:
+        db_execute(
+            db,
+            """
+            UPDATE conversations
+            SET name = ?, profile_picture_url = ?, profile_picture_public_id = ?
+            WHERE id = ?
+            """,
+            (name, picture_url, picture_public_id, conversation_id),
+        )
+
+    if replace_old_picture and (old_url != (picture_url or "") or old_public_id != (picture_public_id or "")):
+        remove_group_picture_file(old_url, old_public_id)
+
+    payload = conversation_payload(conversation_id, user_id)
+    if not payload:
+        return jsonify({"error": "Could not reload the group chat."}), 500
+    emit_to_conversation_members(
+        "conversation_profile_updated",
+        {"conversation": payload},
+        conversation_id,
+    )
+    return jsonify({"conversation": payload}), 200
+
+
+@app.post("/api/conversations/<int:conversation_id>/leave")
+@login_required
+def leave_group_conversation(conversation_id: int) -> Any:
+    if not valid_header_csrf():
+        return jsonify({"error": "The group settings session expired. Refresh and try again."}), 403
+
+    user_id = int(session["user_id"])
+    username = str(session.get("username") or "A member")
+    if not is_conversation_member(conversation_id, user_id):
+        return jsonify({"error": "Group chat not found."}), 404
+
+    with db_connect() as db:
+        conversation = db_execute(
+            db,
+            """
+            SELECT id, name, conversation_type, created_by, is_default,
+                   profile_picture_url, profile_picture_public_id
+            FROM conversations WHERE id = ?
+            """,
+            (conversation_id,),
+        ).fetchone()
+
+        if not conversation or str(conversation["conversation_type"]) != "group":
+            return jsonify({"error": "Only group chats can be left."}), 400
+        if bool(conversation["is_default"]):
+            return jsonify({"error": "You cannot leave the main Kulot Friends group."}), 400
+
+        db_execute(
+            db,
+            "DELETE FROM conversation_members WHERE conversation_id = ? AND user_id = ?",
+            (conversation_id, user_id),
+        )
+        remaining = db_execute(
+            db,
+            """
+            SELECT users.id, users.username
+            FROM conversation_members
+            JOIN users ON users.id = conversation_members.user_id
+            WHERE conversation_members.conversation_id = ?
+            ORDER BY conversation_members.joined_at, users.id
+            """,
+            (conversation_id,),
+        ).fetchall()
+
+        deleted = not remaining
+        if deleted:
+            db_execute(db, "DELETE FROM conversations WHERE id = ?", (conversation_id,))
+        elif int(conversation["created_by"] or 0) == user_id:
+            db_execute(
+                db,
+                "UPDATE conversations SET created_by = ? WHERE id = ?",
+                (int(remaining[0]["id"]), conversation_id),
+            )
+
+    if deleted:
+        remove_group_picture_file(
+            str(conversation["profile_picture_url"] or ""),
+            str(conversation["profile_picture_public_id"] or ""),
+        )
+    else:
+        remaining_payload = conversation_payload(conversation_id, int(remaining[0]["id"]))
+        emit_to_conversation_members(
+            "conversation_members_updated",
+            {
+                "conversation_id": conversation_id,
+                "conversation": remaining_payload,
+                "left_username": username,
+            },
+            conversation_id,
+        )
+
+    return jsonify({"left": True, "conversation_id": conversation_id, "deleted": deleted}), 200
 
 
 @app.post("/api/profile/picture")
@@ -923,7 +1673,7 @@ def remove_profile_picture() -> Any:
         (PROFILE_UPLOAD_DIR / old_url.rsplit("/", 1)[-1]).unlink(missing_ok=True)
 
     refreshed = current_user()
-    profile = profile_payload(refreshed) if refreshed else {"username": session.get("username", ""), "profile_picture_url": None, "note": "", "note_expires_at": None}
+    profile = profile_payload(refreshed) if refreshed else {"username": session.get("username", ""), "profile_picture_url": None, "note": "", "note_expires_at": None, "bio": "", "last_seen_at": None}
     emit_profile_update(profile)
     return jsonify({"profile": profile}), 200
 
@@ -959,6 +1709,44 @@ def update_profile_note() -> Any:
     return jsonify({"profile": profile}), 200
 
 
+@app.post("/api/profile/bio")
+@login_required
+def update_profile_bio() -> Any:
+    if not valid_header_csrf():
+        return jsonify({"error": "The profile session expired. Refresh the page and try again."}), 403
+
+    user = current_user()
+    if not user:
+        return jsonify({"error": "Please log in again."}), 401
+
+    data = request.get_json(silent=True) or {}
+    bio = str(data.get("bio", "")).strip()
+    if len(bio) > 160:
+        return jsonify({"error": "Bios are limited to 160 characters."}), 400
+
+    with db_connect() as db:
+        db_execute(
+            db,
+            "UPDATE users SET bio_text = ? WHERE id = ?",
+            (bio or None, int(user["id"])),
+        )
+
+    refreshed = current_user()
+    if not refreshed:
+        return jsonify({"error": "Could not reload the profile."}), 500
+    profile = profile_payload(refreshed)
+    emit_profile_update(profile)
+    return jsonify({"profile": profile}), 200
+
+
+@app.get("/group-uploads/<path:filename>")
+@login_required
+def group_uploaded_file(filename: str) -> Any:
+    response = send_from_directory(str(GROUP_UPLOAD_DIR), filename)
+    response.headers["Cache-Control"] = "private, max-age=86400"
+    return response
+
+
 @app.get("/profile-uploads/<path:filename>")
 @login_required
 def profile_uploaded_file(filename: str) -> Any:
@@ -986,6 +1774,8 @@ def service_worker() -> Any:
 @app.errorhandler(RequestEntityTooLarge)
 def upload_too_large(error: RequestEntityTooLarge) -> Any:
     del error
+    if request.path.startswith("/api/conversations/") and request.path.endswith("/profile"):
+        return jsonify({"error": f"The group picture is too large. Maximum size is {PROFILE_MAX_UPLOAD_MB} MB."}), 413
     if request.path.startswith("/api/profile/picture"):
         return jsonify({"error": f"The profile picture is too large. Maximum size is {PROFILE_MAX_UPLOAD_MB} MB."}), 413
     if request.path.startswith("/api/messages/upload"):
@@ -1022,12 +1812,12 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-def socket_username() -> str | None:
+def socket_identity() -> tuple[int, str] | None:
     user_id = session.get("user_id")
     username = session.get("username")
     if not user_id or not username:
         return None
-    return str(username)
+    return int(user_id), str(username)
 
 
 def online_usernames() -> list[str]:
@@ -1035,117 +1825,165 @@ def online_usernames() -> list[str]:
         return sorted(username_to_sids.keys(), key=str.lower)
 
 
-def call_snapshot_unlocked() -> dict[str, Any] | None:
-    if not active_call:
-        return None
-    return {
-        **active_call,
-        "participant_count": len(call_participants),
-    }
+def emit_to_conversation_members(event_name: str, payload: Any, conversation_id: int) -> None:
+    with db_connect() as db:
+        rows = db_execute(
+            db,
+            "SELECT user_id FROM conversation_members WHERE conversation_id = ?",
+            (conversation_id,),
+        ).fetchall()
+    for row in rows:
+        socketio.emit(event_name, payload, to=f"user:{int(row['user_id'])}")
 
 
-def call_snapshot() -> dict[str, Any] | None:
+def call_snapshot(conversation_id: int) -> dict[str, Any] | None:
     with state_lock:
-        return call_snapshot_unlocked()
+        call = active_calls.get(conversation_id)
+        if not call:
+            return None
+        return {**call, "conversation_id": conversation_id, "participant_count": len(call_participants.get(conversation_id, {}))}
 
 
 def broadcast_online_users() -> None:
     socketio.emit(
         "online_users",
         {"users": online_usernames(), "members": all_members()},
-        to=GROUP_ROOM,
+        to=GLOBAL_ROOM,
     )
 
 
-def broadcast_call_state() -> None:
-    socketio.emit("call_state", {"call": call_snapshot()}, to=GROUP_ROOM)
+def broadcast_call_state(conversation_id: int) -> None:
+    emit_to_conversation_members(
+        "call_state",
+        {"conversation_id": conversation_id, "call": call_snapshot(conversation_id)},
+        conversation_id,
+    )
 
 
 @socketio.on("connect")
 def handle_connect(auth: Any = None) -> bool | None:
     del auth
-    username = socket_username()
-    if not username:
+    identity = socket_identity()
+    if not identity:
         return False
-
+    user_id, username = identity
     sid = request.sid
+    touch_last_seen(user_id)
     with state_lock:
         sid_to_username[sid] = username
+        sid_to_user_id[sid] = user_id
         username_to_sids.setdefault(username, set()).add(sid)
-    join_room(GROUP_ROOM)
-    emit("call_state", {"call": call_snapshot()})
+    join_room(GLOBAL_ROOM)
+    join_room(f"user:{user_id}")
+    for conversation_id in user_conversation_ids(user_id):
+        join_room(conversation_room(conversation_id))
     broadcast_online_users()
     return None
 
 
+@socketio.on("presence_heartbeat")
+def handle_presence_heartbeat() -> None:
+    identity = socket_identity()
+    if not identity:
+        return
+    user_id, _ = identity
+    touch_last_seen(user_id)
+
+
+@socketio.on("get_call_state")
+def handle_get_call_state(payload: Any) -> None:
+    identity = socket_identity()
+    if not identity or not isinstance(payload, dict):
+        return
+    user_id, _ = identity
+    conversation_id = parse_message_id(payload.get("conversation_id"))
+    if not conversation_id or not is_conversation_member(conversation_id, user_id):
+        return
+    emit("call_state", {"conversation_id": conversation_id, "call": call_snapshot(conversation_id)})
+
+
 @socketio.on("disconnect")
 def handle_disconnect() -> None:
-    global active_call
-
     sid = request.sid
-    departed_call_username: str | None = None
+    conversation_id: int | None = None
+    departed_username: str | None = None
     call_ended = False
+    user_id: int | None = None
+    became_offline = False
 
     with state_lock:
         username = sid_to_username.pop(sid, None)
+        user_id = sid_to_user_id.pop(sid, None)
         if username:
             user_sids = username_to_sids.get(username)
             if user_sids:
                 user_sids.discard(sid)
                 if not user_sids:
                     username_to_sids.pop(username, None)
+                    became_offline = True
 
-        departed_call_username = call_participants.pop(sid, None)
-        if departed_call_username and not call_participants:
-            active_call = None
-            call_ended = True
+        conversation_id = sid_call_conversation.pop(sid, None)
+        if conversation_id is not None:
+            participants = call_participants.get(conversation_id, {})
+            departed_username = participants.pop(sid, None)
+            if not participants:
+                call_participants.pop(conversation_id, None)
+                active_calls.pop(conversation_id, None)
+                call_ended = True
 
-    if departed_call_username:
+    if became_offline and user_id is not None:
+        touch_last_seen(user_id)
+
+    if conversation_id is not None and departed_username:
         socketio.emit(
             "peer_left",
-            {"sid": sid, "username": departed_call_username},
-            to=CALL_ROOM,
+            {"sid": sid, "username": departed_username, "conversation_id": conversation_id},
+            to=call_room(conversation_id),
             skip_sid=sid,
         )
-
-    if call_ended:
-        socketio.emit("call_ended", {}, to=GROUP_ROOM)
-    elif departed_call_username:
-        broadcast_call_state()
+        if call_ended:
+            emit_to_conversation_members("call_ended", {"conversation_id": conversation_id}, conversation_id)
+        else:
+            broadcast_call_state(conversation_id)
 
     broadcast_online_users()
 
 
 @socketio.on("send_message")
 def handle_send_message(payload: Any) -> None:
-    username = socket_username()
+    identity = socket_identity()
     user = current_user()
-    if not username or not user:
+    if not identity or not user or not isinstance(payload, dict):
+        return
+    user_id, username = identity
+    conversation_id = parse_message_id(payload.get("conversation_id"))
+    if not conversation_id or not is_conversation_member(conversation_id, user_id):
+        emit("chat_error", {"message": "Conversation not found."})
         return
 
-    body = ""
-    reply_to_id: int | None = None
-    if isinstance(payload, dict):
-        body = str(payload.get("body", "")).strip()
-        reply_to_id = parse_message_id(payload.get("reply_to_id"))
-
+    body = str(payload.get("body", "")).strip()
+    reply_to_id = parse_message_id(payload.get("reply_to_id"))
     if not body:
         return
     if len(body) > 1000:
         emit("chat_error", {"message": "Messages are limited to 1,000 characters."})
         return
 
-    payload = save_message(int(user["id"]), username, body, reply_to_id=reply_to_id, profile_picture_url=user["profile_picture_url"])
-    socketio.emit("new_message", payload, to=GROUP_ROOM)
+    message = save_message(
+        conversation_id, user_id, username, body,
+        reply_to_id=reply_to_id,
+        profile_picture_url=user["profile_picture_url"],
+    )
+    emit_to_conversation_members("new_message", message, conversation_id)
+    emit_to_conversation_members("conversation_updated", {"conversation_id": conversation_id}, conversation_id)
 
 
 @socketio.on("toggle_reaction")
 def handle_toggle_reaction(payload: Any) -> None:
-    username = socket_username()
-    user_id = session.get("user_id")
-    if not username or not user_id or not isinstance(payload, dict):
+    identity = socket_identity()
+    if not identity or not isinstance(payload, dict):
         return
-
+    user_id, _ = identity
     message_id = parse_message_id(payload.get("message_id"))
     emoji = str(payload.get("emoji", ""))
     if not message_id or emoji not in ALLOWED_REACTIONS:
@@ -1153,141 +1991,146 @@ def handle_toggle_reaction(payload: Any) -> None:
         return
 
     with db_connect() as db:
-        message_exists = db_execute(db, 
-            "SELECT 1 FROM messages WHERE id = ?", (message_id,)
+        message = db_execute(
+            db, "SELECT conversation_id FROM messages WHERE id = ?", (message_id,)
         ).fetchone()
-        if not message_exists:
+        if not message:
             emit("chat_error", {"message": "That message is no longer available."})
             return
+        conversation_id = int(message["conversation_id"])
+        if not is_conversation_member(conversation_id, user_id):
+            return
 
-        existing = db_execute(db, 
+        existing = db_execute(
+            db,
             "SELECT emoji FROM message_reactions WHERE message_id = ? AND user_id = ?",
-            (message_id, int(user_id)),
+            (message_id, user_id),
         ).fetchone()
-
         if existing and str(existing["emoji"]) == emoji:
-            db_execute(db, 
-                "DELETE FROM message_reactions WHERE message_id = ? AND user_id = ?",
-                (message_id, int(user_id)),
-            )
+            db_execute(db, "DELETE FROM message_reactions WHERE message_id = ? AND user_id = ?", (message_id, user_id))
         elif existing:
-            db_execute(db, 
-                """
-                UPDATE message_reactions
-                SET emoji = ?, created_at = ?
-                WHERE message_id = ? AND user_id = ?
-                """,
-                (emoji, utc_now(), message_id, int(user_id)),
+            db_execute(
+                db,
+                "UPDATE message_reactions SET emoji = ?, created_at = ? WHERE message_id = ? AND user_id = ?",
+                (emoji, utc_now(), message_id, user_id),
             )
         else:
-            db_execute(db, 
-                """
-                INSERT INTO message_reactions (message_id, user_id, emoji, created_at)
-                VALUES (?, ?, ?, ?)
-                """,
-                (message_id, int(user_id), emoji, utc_now()),
+            db_execute(
+                db,
+                "INSERT INTO message_reactions (message_id, user_id, emoji, created_at) VALUES (?, ?, ?, ?)",
+                (message_id, user_id, emoji, utc_now()),
             )
 
     reactions = reaction_summaries([message_id]).get(message_id, [])
-    socketio.emit(
+    emit_to_conversation_members(
         "reaction_updated",
-        {"message_id": message_id, "reactions": reactions},
-        to=GROUP_ROOM,
+        {"message_id": message_id, "conversation_id": conversation_id, "reactions": reactions},
+        conversation_id,
     )
 
 
 @socketio.on("start_group_call")
 def handle_start_group_call(payload: Any) -> None:
-    global active_call
-
-    username = socket_username()
-    if not username:
+    identity = socket_identity()
+    if not identity or not isinstance(payload, dict):
         return
-
-    mode = "audio"
-    if isinstance(payload, dict) and payload.get("mode") == "video":
-        mode = "video"
-
+    user_id, username = identity
+    conversation_id = parse_message_id(payload.get("conversation_id"))
+    if not conversation_id or not is_conversation_member(conversation_id, user_id):
+        emit("call_start_error", {"message": "Conversation not found."})
+        return
+    mode = "video" if payload.get("mode") == "video" else "audio"
     sid = request.sid
+
     with state_lock:
-        if active_call:
-            existing_call = call_snapshot_unlocked()
+        existing = active_calls.get(conversation_id)
+        if existing:
+            existing_call = {**existing, "conversation_id": conversation_id, "participant_count": len(call_participants.get(conversation_id, {}))}
         else:
-            active_call = {
-                "mode": mode,
-                "started_by": username,
-                "started_at": utc_now(),
+            active_calls[conversation_id] = {
+                "mode": mode, "started_by": username, "started_at": utc_now()
             }
-            peers: list[dict[str, str]] = []
-            call_participants[sid] = username
+            call_participants[conversation_id] = {sid: username}
+            sid_call_conversation[sid] = conversation_id
             existing_call = None
-            started_call = call_snapshot_unlocked()
+            started_call = call_snapshot(conversation_id)
 
     if existing_call:
         emit("call_already_active", {"call": existing_call})
         return
 
-    join_room(CALL_ROOM)
-    emit("call_peers", {"peers": peers, "mode": mode})
-    socketio.emit("call_started", {"call": started_call}, to=GROUP_ROOM)
+    join_room(call_room(conversation_id))
+    emit("call_peers", {"peers": [], "mode": mode, "conversation_id": conversation_id})
+    emit_to_conversation_members("call_started", {"call": started_call}, conversation_id)
 
 
 @socketio.on("join_call")
-def handle_join_call() -> None:
-    username = socket_username()
-    if not username:
+def handle_join_call(payload: Any) -> None:
+    identity = socket_identity()
+    if not identity or not isinstance(payload, dict):
         return
-
+    user_id, username = identity
+    conversation_id = parse_message_id(payload.get("conversation_id"))
+    if not conversation_id or not is_conversation_member(conversation_id, user_id):
+        return
     sid = request.sid
     with state_lock:
-        if not active_call:
+        call = active_calls.get(conversation_id)
+        if not call:
             emit("call_start_error", {"message": "This call has already ended."})
             return
-        if sid in call_participants:
+        participants = call_participants.setdefault(conversation_id, {})
+        if sid in participants:
             return
-        peers = [
-            {"sid": peer_sid, "username": peer_username}
-            for peer_sid, peer_username in call_participants.items()
-        ]
-        call_participants[sid] = username
-        mode = str(active_call["mode"])
+        peers = [{"sid": peer_sid, "username": peer_username} for peer_sid, peer_username in participants.items()]
+        participants[sid] = username
+        sid_call_conversation[sid] = conversation_id
+        mode = str(call["mode"])
 
-    join_room(CALL_ROOM)
-    emit("call_peers", {"peers": peers, "mode": mode})
+    join_room(call_room(conversation_id))
+    emit("call_peers", {"peers": peers, "mode": mode, "conversation_id": conversation_id})
     socketio.emit(
         "peer_joined",
-        {"sid": sid, "username": username},
-        to=CALL_ROOM,
+        {"sid": sid, "username": username, "conversation_id": conversation_id},
+        to=call_room(conversation_id),
         skip_sid=sid,
     )
-    broadcast_call_state()
+    broadcast_call_state(conversation_id)
 
 
 @socketio.on("leave_call")
-def handle_leave_call() -> None:
-    global active_call
-
+def handle_leave_call(payload: Any = None) -> None:
     sid = request.sid
+    conversation_id = sid_call_conversation.get(sid)
+    if isinstance(payload, dict):
+        requested = parse_message_id(payload.get("conversation_id"))
+        if requested:
+            conversation_id = requested
+    if conversation_id is None:
+        return
+
     call_ended = False
     with state_lock:
-        username = call_participants.pop(sid, None)
-        if username and not call_participants:
-            active_call = None
+        participants = call_participants.get(conversation_id, {})
+        username = participants.pop(sid, None)
+        sid_call_conversation.pop(sid, None)
+        if username and not participants:
+            call_participants.pop(conversation_id, None)
+            active_calls.pop(conversation_id, None)
             call_ended = True
 
-    leave_room(CALL_ROOM)
+    leave_room(call_room(conversation_id))
     if username:
         socketio.emit(
             "peer_left",
-            {"sid": sid, "username": username},
-            to=CALL_ROOM,
+            {"sid": sid, "username": username, "conversation_id": conversation_id},
+            to=call_room(conversation_id),
             skip_sid=sid,
         )
-
     if call_ended:
-        socketio.emit("call_ended", {}, to=GROUP_ROOM)
+        emit_to_conversation_members("call_ended", {"conversation_id": conversation_id}, conversation_id)
     elif username:
-        broadcast_call_state()
+        broadcast_call_state(conversation_id)
 
 
 def relay_to_peer(event_name: str, payload: Any) -> None:
@@ -1295,21 +2138,22 @@ def relay_to_peer(event_name: str, payload: Any) -> None:
         return
     target = str(payload.get("target", ""))
     data = payload.get("data")
-    if not target:
+    conversation_id = sid_call_conversation.get(request.sid)
+    if not target or conversation_id is None:
         return
-
     with state_lock:
-        sender_username = call_participants.get(request.sid)
-        target_exists = target in call_participants
+        participants = call_participants.get(conversation_id, {})
+        sender_username = participants.get(request.sid)
+        target_exists = target in participants
     if not sender_username or not target_exists:
         return
-
     socketio.emit(
         event_name,
         {
             "from": request.sid,
             "username": sender_username,
             "data": data,
+            "conversation_id": conversation_id,
         },
         to=target,
     )
@@ -1331,6 +2175,7 @@ def handle_webrtc_ice(payload: Any) -> None:
 
 
 init_db()
+ensure_default_conversation()
 
 if __name__ == "__main__":
     socketio.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=True)
