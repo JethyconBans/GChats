@@ -620,54 +620,132 @@ def conversation_payload(conversation_id: int, viewer_id: int) -> dict[str, Any]
 
 
 def conversation_summaries(user_id: int) -> list[dict[str, Any]]:
-    conversation_ids = user_conversation_ids(user_id)
-    summaries: list[dict[str, Any]] = []
-    with db_connect() as db:
-        for conversation_id in conversation_ids:
-            payload = conversation_payload(conversation_id, user_id)
-            if not payload:
-                continue
-            last = db_execute(
-                db,
-                """
-                SELECT messages.id, messages.body, messages.sent_at, messages.message_type,
-                       messages.attachment_name, users.username
-                FROM messages
-                JOIN users ON users.id = messages.user_id
-                WHERE messages.conversation_id = ?
-                ORDER BY messages.id DESC LIMIT 1
-                """,
-                (conversation_id,),
-            ).fetchone()
-            if last:
-                body = str(last["body"] or "").strip()
-                if not body:
-                    if str(last["message_type"]) == "image":
-                        body = "sent a photo"
-                    elif str(last["message_type"]) == "video":
-                        body = "sent a video"
-                    else:
-                        body = "sent an attachment"
-                payload.update(
-                    {
-                        "last_message_id": int(last["id"]),
-                        "last_message": body[:90],
-                        "last_sender": str(last["username"]),
-                        "last_sent_at": str(last["sent_at"]),
-                    }
-                )
-            else:
-                payload.update(
-                    {
-                        "last_message_id": 0,
-                        "last_message": "Start a conversation",
-                        "last_sender": "",
-                        "last_sent_at": "",
-                    }
-                )
-            summaries.append(payload)
+    """Load the inbox in two database queries instead of several queries per chat.
 
-    summaries.sort(key=lambda item: int(item.get("last_message_id", 0)), reverse=True)
+    This is especially important for a cloud PostgreSQL database, where repeatedly
+    opening connections and running N+1 queries can make every conversation click
+    feel slow.
+    """
+    with db_connect() as db:
+        conversation_rows = db_execute(
+            db,
+            """
+            WITH ranked_messages AS (
+                SELECT messages.id, messages.conversation_id, messages.body,
+                       messages.sent_at, messages.message_type,
+                       messages.attachment_name, messages.user_id,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY messages.conversation_id
+                           ORDER BY messages.id DESC
+                       ) AS row_number
+                FROM messages
+            )
+            SELECT conversations.id, conversations.name,
+                   conversations.profile_picture_url,
+                   conversations.conversation_type,
+                   conversations.created_by, conversations.created_at,
+                   conversations.is_default,
+                   ranked_messages.id AS last_message_id,
+                   ranked_messages.body AS last_body,
+                   ranked_messages.sent_at AS last_sent_at,
+                   ranked_messages.message_type AS last_message_type,
+                   ranked_messages.attachment_name AS last_attachment_name,
+                   last_user.username AS last_username
+            FROM conversation_members AS mine
+            JOIN conversations
+              ON conversations.id = mine.conversation_id
+            LEFT JOIN ranked_messages
+              ON ranked_messages.conversation_id = conversations.id
+             AND ranked_messages.row_number = 1
+            LEFT JOIN users AS last_user
+              ON last_user.id = ranked_messages.user_id
+            WHERE mine.user_id = ?
+            ORDER BY COALESCE(ranked_messages.id, 0) DESC
+            """,
+            (user_id,),
+        ).fetchall()
+
+        if not conversation_rows:
+            return []
+
+        conversation_ids = [int(row["id"]) for row in conversation_rows]
+        placeholders = ",".join("?" for _ in conversation_ids)
+        member_rows = db_execute(
+            db,
+            f"""
+            SELECT conversation_members.conversation_id,
+                   users.id, users.username, users.profile_picture_url,
+                   users.note_text, users.note_expires_at,
+                   users.bio_text, users.last_seen_at
+            FROM conversation_members
+            JOIN users ON users.id = conversation_members.user_id
+            WHERE conversation_members.conversation_id IN ({placeholders})
+            ORDER BY conversation_members.conversation_id, LOWER(users.username)
+            """,
+            tuple(conversation_ids),
+        ).fetchall()
+
+    members_by_conversation: dict[int, list[dict[str, Any]]] = {
+        conversation_id: [] for conversation_id in conversation_ids
+    }
+    for member_row in member_rows:
+        conversation_id = int(member_row["conversation_id"])
+        members_by_conversation.setdefault(conversation_id, []).append(
+            {**profile_payload(member_row), "id": int(member_row["id"])}
+        )
+
+    summaries: list[dict[str, Any]] = []
+    for row in conversation_rows:
+        conversation_id = int(row["id"])
+        members = members_by_conversation.get(conversation_id, [])
+        conversation_type = str(row["conversation_type"])
+
+        if conversation_type == "direct":
+            other = next(
+                (member for member in members if int(member["id"]) != user_id),
+                None,
+            )
+            title = str(other["username"]) if other else "Private chat"
+            avatar_url = other.get("profile_picture_url") if other else None
+        else:
+            title = str(row["name"] or "Group chat")
+            avatar_url = row["profile_picture_url"]
+
+        last_message_id = int(row["last_message_id"] or 0)
+        if last_message_id:
+            last_message = str(row["last_body"] or "").strip()
+            if not last_message:
+                message_type = str(row["last_message_type"] or "")
+                if message_type == "image":
+                    last_message = "sent a photo"
+                elif message_type == "video":
+                    last_message = "sent a video"
+                else:
+                    last_message = "sent an attachment"
+            last_sender = str(row["last_username"] or "")
+            last_sent_at = str(row["last_sent_at"] or "")
+        else:
+            last_message = "Start a conversation"
+            last_sender = ""
+            last_sent_at = ""
+
+        summaries.append(
+            {
+                "id": conversation_id,
+                "name": title,
+                "type": conversation_type,
+                "avatar_url": avatar_url,
+                "member_count": len(members),
+                "members": members,
+                "is_default": bool(row["is_default"]),
+                "can_edit": conversation_type == "group",
+                "last_message_id": last_message_id,
+                "last_message": last_message[:90],
+                "last_sender": last_sender,
+                "last_sent_at": last_sent_at,
+            }
+        )
+
     return summaries
 
 
@@ -1108,7 +1186,14 @@ def render_chat_page(selected_conversation_id: int | None = None) -> Any:
     selected = None
     messages: list[dict[str, Any]] = []
     if selected_conversation_id is not None:
-        selected = conversation_payload(selected_conversation_id, user_id)
+        selected = next(
+            (
+                conversation
+                for conversation in conversations
+                if int(conversation["id"]) == selected_conversation_id
+            ),
+            None,
+        )
         if not selected:
             flash("You are not a member of that conversation.", "error")
             return redirect(url_for("chat"))
