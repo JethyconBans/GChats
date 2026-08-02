@@ -1,0 +1,860 @@
+--- /mnt/data/kulot_current/kulot-friends-chat/app.py	2026-07-31 11:17:35.934278902 +0000
++++ /mnt/data/gchats_native_remake/backend_patch/app.py	2026-07-31 11:37:14.818321062 +0000
+@@ -1,6 +1,7 @@
+ from __future__ import annotations
+ 
+ import hmac
++import hashlib
+ import json
+ import mimetypes
+ import os
+@@ -25,6 +26,7 @@
+ from dotenv import load_dotenv
+ from flask import (
+     Flask,
++    g,
+     flash,
+     jsonify,
+     redirect,
+@@ -70,6 +72,7 @@
+ PROFILE_MAX_UPLOAD_MB = max(1, min(10, get_int_env("PROFILE_MAX_UPLOAD_MB", 5)))
+ HISTORY_PAGE_SIZE = max(20, min(100, get_int_env("HISTORY_PAGE_SIZE", 50)))
+ REMEMBER_DAYS = max(1, get_int_env("REMEMBER_DAYS", 90))
++MOBILE_TOKEN_DAYS = max(1, get_int_env("MOBILE_TOKEN_DAYS", 180))
+ CLOUDINARY_URL = os.getenv("CLOUDINARY_URL", "").strip()
+ USE_CLOUDINARY = bool(CLOUDINARY_URL)
+ if USE_CLOUDINARY:
+@@ -203,6 +206,20 @@
+                 FOREIGN KEY (reply_to_id) REFERENCES messages(id) ON DELETE SET NULL
+             );
+ 
++            CREATE TABLE IF NOT EXISTS api_tokens (
++                id INTEGER PRIMARY KEY AUTOINCREMENT,
++                user_id INTEGER NOT NULL,
++                token_hash TEXT NOT NULL UNIQUE,
++                created_at TEXT NOT NULL,
++                expires_at TEXT NOT NULL,
++                last_used_at TEXT NOT NULL,
++                device_name TEXT,
++                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
++            );
++
++            CREATE INDEX IF NOT EXISTS idx_api_tokens_user_id
++                ON api_tokens(user_id);
++
+             CREATE TABLE IF NOT EXISTS message_reactions (
+                 message_id INTEGER NOT NULL,
+                 user_id INTEGER NOT NULL,
+@@ -333,6 +350,18 @@
+         )
+         """,
+         """
++        CREATE TABLE IF NOT EXISTS api_tokens (
++            id BIGSERIAL PRIMARY KEY,
++            user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
++            token_hash TEXT NOT NULL UNIQUE,
++            created_at TEXT NOT NULL,
++            expires_at TEXT NOT NULL,
++            last_used_at TEXT NOT NULL,
++            device_name TEXT
++        )
++        """,
++        "CREATE INDEX IF NOT EXISTS idx_api_tokens_user_id ON api_tokens(user_id)",
++        """
+         CREATE TABLE IF NOT EXISTS message_reactions (
+             message_id BIGINT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+             user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+@@ -407,6 +436,11 @@
+ def current_user() -> DbRow | None:
+     user_id = session.get("user_id")
+     if not user_id:
++        try:
++            user_id = sid_to_user_id.get(request.sid)
++        except (AttributeError, RuntimeError):
++            user_id = None
++    if not user_id:
+         return None
+     with db_connect() as db:
+         return db_execute(
+@@ -1898,6 +1932,17 @@
+ 
+ 
+ def socket_identity() -> tuple[int, str] | None:
++    try:
++        sid = request.sid
++    except (AttributeError, RuntimeError):
++        sid = None
++    if sid:
++        with state_lock:
++            user_id = sid_to_user_id.get(sid)
++            username = sid_to_username.get(sid)
++        if user_id and username:
++            return int(user_id), str(username)
++
+     user_id = session.get("user_id")
+     username = session.get("username")
+     if not user_id or not username:
+@@ -1947,8 +1992,12 @@
+ 
+ @socketio.on("connect")
+ def handle_connect(auth: Any = None) -> bool | None:
+-    del auth
+     identity = socket_identity()
++    if not identity and isinstance(auth, dict):
++        raw_token = str(auth.get("token", "")).strip()
++        mobile_user = mobile_user_from_token(raw_token, touch=False) if raw_token else None
++        if mobile_user:
++            identity = int(mobile_user["id"]), str(mobile_user["username"])
+     if not identity:
+         return False
+     user_id, username = identity
+@@ -2259,6 +2308,749 @@
+     relay_to_peer("webrtc_ice", payload)
+ 
+ 
++
++
++@app.get("/privacy")
++def privacy_policy_page() -> Any:
++    return render_template("privacy.html")
++
++
++@app.route("/account-deletion", methods=["GET", "POST"])
++def account_deletion_page() -> Any:
++    message = ""
++    error = ""
++    if request.method == "POST":
++        if not valid_csrf():
++            error = "The form expired. Refresh the page and try again."
++        else:
++            username = request.form.get("username", "").strip()
++            password = request.form.get("password", "")
++            with db_connect() as db:
++                user = db_execute(
++                    db,
++                    "SELECT id, username, password_hash, profile_picture_url, profile_picture_public_id FROM users WHERE LOWER(username) = LOWER(?)",
++                    (username,),
++                ).fetchone()
++                if not user or not check_password_hash(str(user["password_hash"]), password):
++                    error = "Invalid username or password."
++                else:
++                    db_execute(db, "DELETE FROM users WHERE id = ?", (int(user["id"]),))
++                    old_url = str(user["profile_picture_url"] or "")
++                    old_public_id = str(user["profile_picture_public_id"] or "")
++                    if USE_CLOUDINARY and old_public_id:
++                        try:
++                            cloudinary.uploader.destroy(old_public_id, resource_type="image", invalidate=True)
++                        except Exception:
++                            app.logger.warning("Could not remove profile picture during account deletion.")
++                    elif old_url.startswith("/profile-uploads/"):
++                        (PROFILE_UPLOAD_DIR / old_url.rsplit("/", 1)[-1]).unlink(missing_ok=True)
++                    message = "Your GChats account and associated database records were deleted."
++    return render_template("account_deletion.html", message=message, error=error)
++
++
++# ---------------------------------------------------------------------------
++# Native Flutter mobile API
++# ---------------------------------------------------------------------------
++
++def user_by_id(user_id: int) -> DbRow | None:
++    with db_connect() as db:
++        return db_execute(
++            db,
++            """
++            SELECT id, username, password_hash, created_at, profile_picture_url,
++                   profile_picture_public_id, note_text, note_expires_at,
++                   bio_text, last_seen_at
++            FROM users WHERE id = ?
++            """,
++            (user_id,),
++        ).fetchone()
++
++
++def mobile_token_hash(raw_token: str) -> str:
++    return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
++
++
++def parse_utc_datetime(value: Any) -> datetime | None:
++    if not value:
++        return None
++    try:
++        parsed = datetime.fromisoformat(str(value))
++        if parsed.tzinfo is None:
++            parsed = parsed.replace(tzinfo=timezone.utc)
++        return parsed
++    except (TypeError, ValueError):
++        return None
++
++
++def issue_mobile_token(user_id: int, device_name: str = "Android") -> str:
++    raw_token = secrets.token_urlsafe(48)
++    now = datetime.now(timezone.utc)
++    expires_at = now + timedelta(days=MOBILE_TOKEN_DAYS)
++    with db_connect() as db:
++        db_execute(
++            db,
++            "DELETE FROM api_tokens WHERE expires_at < ?",
++            (now.isoformat(),),
++        )
++        db_execute(
++            db,
++            """
++            INSERT INTO api_tokens
++                (user_id, token_hash, created_at, expires_at, last_used_at, device_name)
++            VALUES (?, ?, ?, ?, ?, ?)
++            """,
++            (
++                user_id,
++                mobile_token_hash(raw_token),
++                now.isoformat(),
++                expires_at.isoformat(),
++                now.isoformat(),
++                device_name[:120],
++            ),
++        )
++    return raw_token
++
++
++def mobile_user_from_token(raw_token: str, *, touch: bool = True) -> DbRow | None:
++    if not raw_token or len(raw_token) < 32:
++        return None
++    token_hash = mobile_token_hash(raw_token)
++    with db_connect() as db:
++        row = db_execute(
++            db,
++            """
++            SELECT users.id, users.username, users.password_hash, users.created_at,
++                   users.profile_picture_url, users.profile_picture_public_id,
++                   users.note_text, users.note_expires_at, users.bio_text,
++                   users.last_seen_at, api_tokens.expires_at
++            FROM api_tokens
++            JOIN users ON users.id = api_tokens.user_id
++            WHERE api_tokens.token_hash = ?
++            """,
++            (token_hash,),
++        ).fetchone()
++        if not row:
++            return None
++        expires_at = parse_utc_datetime(row["expires_at"])
++        if not expires_at or expires_at <= datetime.now(timezone.utc):
++            db_execute(db, "DELETE FROM api_tokens WHERE token_hash = ?", (token_hash,))
++            return None
++        if touch:
++            db_execute(
++                db,
++                "UPDATE api_tokens SET last_used_at = ? WHERE token_hash = ?",
++                (utc_now(), token_hash),
++            )
++    return row
++
++
++def mobile_bearer_token() -> str:
++    header = request.headers.get("Authorization", "").strip()
++    if not header.lower().startswith("bearer "):
++        return ""
++    return header[7:].strip()
++
++
++def mobile_token_required(view: F) -> F:
++    @wraps(view)
++    def wrapped(*args: Any, **kwargs: Any) -> Any:
++        raw_token = mobile_bearer_token()
++        user = mobile_user_from_token(raw_token)
++        if not user:
++            return jsonify({"error": "Your login expired. Please sign in again."}), 401
++        g.mobile_user = user
++        g.mobile_token = raw_token
++        touch_last_seen(int(user["id"]))
++        return view(*args, **kwargs)
++
++    return wrapped  # type: ignore[return-value]
++
++
++def mobile_current_user() -> DbRow:
++    return g.mobile_user
++
++
++def mobile_member_payloads() -> list[dict[str, Any]]:
++    online = set(online_usernames())
++    members = all_members()
++    for member in members:
++        member["is_online"] = str(member["username"]) in online
++    return members
++
++
++def mobile_conversation_payloads(user_id: int) -> list[dict[str, Any]]:
++    online = set(online_usernames())
++    conversations = conversation_summaries(user_id)
++    for conversation in conversations:
++        for member in conversation.get("members", []):
++            member["is_online"] = str(member.get("username", "")) in online
++    return conversations
++
++
++def json_error(message: str, status: int = 400) -> tuple[Any, int]:
++    return jsonify({"error": message}), status
++
++
++@app.post("/api/mobile/auth/register")
++def mobile_register() -> Any:
++    data = request.get_json(silent=True) or {}
++    username = str(data.get("username", "")).strip()
++    password = str(data.get("password", ""))
++    invite_code = str(data.get("invite_code", ""))
++    device_name = str(data.get("device_name", "Android"))
++    expected_invite = os.getenv("INVITE_CODE", "KULOT-FRIENDS-2026")
++
++    if not USERNAME_RE.fullmatch(username):
++        return json_error("Username must be 3–24 characters using letters, numbers, or _.")
++    if len(password) < 8:
++        return json_error("Password must contain at least 8 characters.")
++    if not hmac.compare_digest(invite_code, expected_invite):
++        return json_error("The invite code is incorrect.", 403)
++
++    try:
++        with db_connect() as db:
++            user_id = insert_and_get_id(
++                db,
++                "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
++                (username, generate_password_hash(password), utc_now()),
++            )
++        add_user_to_default_conversation(user_id)
++    except (sqlite3.IntegrityError, psycopg.IntegrityError):
++        return json_error("That username is already taken.", 409)
++
++    user = user_by_id(user_id)
++    if not user:
++        return json_error("The account was created but could not be loaded.", 500)
++    token = issue_mobile_token(user_id, device_name)
++    return jsonify(
++        {
++            "token": token,
++            "user": profile_payload(user),
++            "conversations": mobile_conversation_payloads(user_id),
++        }
++    ), 201
++
++
++@app.post("/api/mobile/auth/login")
++def mobile_login() -> Any:
++    data = request.get_json(silent=True) or {}
++    username = str(data.get("username", "")).strip()
++    password = str(data.get("password", ""))
++    device_name = str(data.get("device_name", "Android"))
++    with db_connect() as db:
++        user = db_execute(
++            db,
++            """
++            SELECT id, username, password_hash, created_at, profile_picture_url,
++                   profile_picture_public_id, note_text, note_expires_at,
++                   bio_text, last_seen_at
++            FROM users WHERE LOWER(username) = LOWER(?)
++            """,
++            (username,),
++        ).fetchone()
++    if not user or not check_password_hash(str(user["password_hash"]), password):
++        return json_error("Invalid username or password.", 401)
++    user_id = int(user["id"])
++    touch_last_seen(user_id)
++    token = issue_mobile_token(user_id, device_name)
++    return jsonify(
++        {
++            "token": token,
++            "user": profile_payload(user),
++            "conversations": mobile_conversation_payloads(user_id),
++        }
++    )
++
++
++@app.post("/api/mobile/auth/logout")
++@mobile_token_required
++def mobile_logout() -> Any:
++    token_hash = mobile_token_hash(str(g.mobile_token))
++    with db_connect() as db:
++        db_execute(db, "DELETE FROM api_tokens WHERE token_hash = ?", (token_hash,))
++    return jsonify({"logged_out": True})
++
++
++@app.get("/api/mobile/bootstrap")
++@mobile_token_required
++def mobile_bootstrap() -> Any:
++    user = mobile_current_user()
++    user_id = int(user["id"])
++    return jsonify(
++        {
++            "user": profile_payload(user),
++            "members": mobile_member_payloads(),
++            "conversations": mobile_conversation_payloads(user_id),
++            "online_users": online_usernames(),
++            "max_upload_mb": MAX_UPLOAD_MB,
++            "profile_max_upload_mb": PROFILE_MAX_UPLOAD_MB,
++            "ice_servers": public_ice_servers(),
++        }
++    )
++
++
++@app.get("/api/mobile/users")
++@mobile_token_required
++def mobile_search_users() -> Any:
++    user = mobile_current_user()
++    query = str(request.args.get("q", "")).strip().lower()
++    members = [member for member in mobile_member_payloads() if int(member["id"]) != int(user["id"])]
++    if query:
++        members = [member for member in members if query in str(member["username"]).lower()]
++    return jsonify({"users": members[:100]})
++
++
++@app.get("/api/mobile/conversations")
++@mobile_token_required
++def mobile_conversations() -> Any:
++    user = mobile_current_user()
++    return jsonify({"conversations": mobile_conversation_payloads(int(user["id"]))})
++
++
++@app.get("/api/mobile/conversations/<int:conversation_id>")
++@mobile_token_required
++def mobile_conversation_detail(conversation_id: int) -> Any:
++    user = mobile_current_user()
++    payload = conversation_payload(conversation_id, int(user["id"]))
++    if not payload:
++        return json_error("Conversation not found.", 404)
++    online = set(online_usernames())
++    for member in payload.get("members", []):
++        member["is_online"] = str(member.get("username", "")) in online
++    return jsonify({"conversation": payload})
++
++
++@app.post("/api/mobile/conversations/private")
++@mobile_token_required
++def mobile_create_private_chat() -> Any:
++    user = mobile_current_user()
++    data = request.get_json(silent=True) or {}
++    try:
++        other_user_id = int(data.get("user_id"))
++        conversation_id = get_or_create_direct_conversation(int(user["id"]), other_user_id)
++    except (TypeError, ValueError) as exc:
++        return json_error(str(exc) or "Choose a valid friend.")
++    except LookupError as exc:
++        return json_error(str(exc), 404)
++    payload = conversation_payload(conversation_id, int(user["id"]))
++    emit_to_conversation_members("conversation_created", {"conversation_id": conversation_id}, conversation_id)
++    return jsonify({"conversation": payload}), 201
++
++
++@app.post("/api/mobile/conversations/group")
++@mobile_token_required
++def mobile_create_group_chat() -> Any:
++    user = mobile_current_user()
++    data = request.get_json(silent=True) or {}
++    name = str(data.get("name", "")).strip()
++    raw_ids = data.get("member_ids", [])
++    try:
++        member_ids = [int(value) for value in raw_ids] if isinstance(raw_ids, list) else []
++        conversation_id = create_group_conversation(int(user["id"]), name, member_ids)
++    except (TypeError, ValueError) as exc:
++        return json_error(str(exc) or "Check the group name and members.")
++    except LookupError as exc:
++        return json_error(str(exc), 404)
++    payload = conversation_payload(conversation_id, int(user["id"]))
++    emit_to_conversation_members("conversation_created", {"conversation_id": conversation_id}, conversation_id)
++    return jsonify({"conversation": payload}), 201
++
++
++@app.get("/api/mobile/conversations/<int:conversation_id>/messages")
++@mobile_token_required
++def mobile_messages(conversation_id: int) -> Any:
++    user = mobile_current_user()
++    user_id = int(user["id"])
++    if not is_conversation_member(conversation_id, user_id):
++        return json_error("Conversation not found.", 404)
++    before_id = parse_message_id(request.args.get("before_id"))
++    try:
++        limit = max(1, min(100, int(request.args.get("limit", HISTORY_PAGE_SIZE))))
++    except (TypeError, ValueError):
++        limit = HISTORY_PAGE_SIZE
++    messages = messages_before(conversation_id, before_id=before_id, limit=limit)
++    oldest_id = int(messages[0]["id"]) if messages else before_id
++    return jsonify(
++        {
++            "messages": messages,
++            "has_more": has_messages_before(conversation_id, oldest_id),
++        }
++    )
++
++
++@app.post("/api/mobile/conversations/<int:conversation_id>/messages")
++@mobile_token_required
++def mobile_send_message(conversation_id: int) -> Any:
++    user = mobile_current_user()
++    user_id = int(user["id"])
++    if not is_conversation_member(conversation_id, user_id):
++        return json_error("Conversation not found.", 404)
++    data = request.get_json(silent=True) or {}
++    body = str(data.get("body", "")).strip()
++    reply_to_id = parse_message_id(data.get("reply_to_id"))
++    if not body:
++        return json_error("Message cannot be empty.")
++    if len(body) > 1000:
++        return json_error("Messages are limited to 1,000 characters.")
++    payload = save_message(
++        conversation_id,
++        user_id,
++        str(user["username"]),
++        body,
++        reply_to_id=reply_to_id,
++        profile_picture_url=user["profile_picture_url"],
++    )
++    emit_to_conversation_members("new_message", payload, conversation_id)
++    emit_to_conversation_members("conversation_updated", {"conversation_id": conversation_id}, conversation_id)
++    return jsonify({"message": payload}), 201
++
++
++@app.post("/api/mobile/conversations/<int:conversation_id>/upload")
++@mobile_token_required
++def mobile_upload_message(conversation_id: int) -> Any:
++    user = mobile_current_user()
++    user_id = int(user["id"])
++    if not is_conversation_member(conversation_id, user_id):
++        return json_error("Conversation not found.", 404)
++    uploaded = request.files.get("file")
++    if not uploaded or not uploaded.filename:
++        return json_error("Choose a picture or video first.")
++    original_name = secure_filename(uploaded.filename)
++    classification = classify_upload(original_name, uploaded.mimetype or "")
++    if not classification:
++        return json_error("Unsupported picture or video format.")
++    message_type, extension = classification
++    caption = str(request.form.get("caption", "")).strip()
++    reply_to_id = parse_message_id(request.form.get("reply_to_id"))
++    if len(caption) > 1000:
++        return json_error("Captions are limited to 1,000 characters.")
++
++    if USE_CLOUDINARY:
++        try:
++            result = cloudinary.uploader.upload(
++                uploaded.stream,
++                resource_type="video" if message_type == "video" else "image",
++                folder="kulot-friends-chat",
++                public_id=uuid.uuid4().hex,
++                overwrite=False,
++            )
++            attachment_url = str(result.get("secure_url") or "")
++            if not attachment_url:
++                raise RuntimeError("Cloud media storage did not return a secure URL.")
++        except Exception as exc:
++            app.logger.exception("Mobile cloud upload failed")
++            return json_error(f"Cloud upload failed: {exc}", 502)
++    else:
++        stored_name = f"{uuid.uuid4().hex}{extension}"
++        uploaded.save(UPLOAD_DIR / stored_name)
++        attachment_url = url_for("uploaded_file", filename=stored_name)
++
++    payload = save_message(
++        conversation_id,
++        user_id,
++        str(user["username"]),
++        caption,
++        message_type=message_type,
++        attachment_url=attachment_url,
++        attachment_name=original_name,
++        attachment_mime=uploaded.mimetype or None,
++        reply_to_id=reply_to_id,
++        profile_picture_url=user["profile_picture_url"],
++    )
++    emit_to_conversation_members("new_message", payload, conversation_id)
++    emit_to_conversation_members("conversation_updated", {"conversation_id": conversation_id}, conversation_id)
++    return jsonify({"message": payload}), 201
++
++
++@app.post("/api/mobile/messages/<int:message_id>/reaction")
++@mobile_token_required
++def mobile_toggle_reaction(message_id: int) -> Any:
++    user = mobile_current_user()
++    user_id = int(user["id"])
++    data = request.get_json(silent=True) or {}
++    emoji = str(data.get("emoji", ""))
++    if emoji not in ALLOWED_REACTIONS:
++        return json_error("That reaction is not supported.")
++    with db_connect() as db:
++        message = db_execute(db, "SELECT conversation_id FROM messages WHERE id = ?", (message_id,)).fetchone()
++        if not message:
++            return json_error("That message is no longer available.", 404)
++        conversation_id = int(message["conversation_id"])
++        if not is_conversation_member(conversation_id, user_id):
++            return json_error("Conversation not found.", 404)
++        existing = db_execute(
++            db,
++            "SELECT emoji FROM message_reactions WHERE message_id = ? AND user_id = ?",
++            (message_id, user_id),
++        ).fetchone()
++        if existing and str(existing["emoji"]) == emoji:
++            db_execute(db, "DELETE FROM message_reactions WHERE message_id = ? AND user_id = ?", (message_id, user_id))
++        elif existing:
++            db_execute(
++                db,
++                "UPDATE message_reactions SET emoji = ?, created_at = ? WHERE message_id = ? AND user_id = ?",
++                (emoji, utc_now(), message_id, user_id),
++            )
++        else:
++            db_execute(
++                db,
++                "INSERT INTO message_reactions (message_id, user_id, emoji, created_at) VALUES (?, ?, ?, ?)",
++                (message_id, user_id, emoji, utc_now()),
++            )
++    reactions = reaction_summaries([message_id]).get(message_id, [])
++    payload = {"message_id": message_id, "conversation_id": conversation_id, "reactions": reactions}
++    emit_to_conversation_members("reaction_updated", payload, conversation_id)
++    return jsonify(payload)
++
++
++def mobile_store_profile_picture(user: DbRow, uploaded: Any) -> tuple[str, str | None]:
++    original_name = secure_filename(uploaded.filename or "")
++    classification = classify_upload(original_name, uploaded.mimetype or "")
++    if not classification or classification[0] != "image":
++        raise ValueError("Profile pictures must be JPG, PNG, GIF, or WEBP.")
++    extension = classification[1]
++    if USE_CLOUDINARY:
++        result = cloudinary.uploader.upload(
++            uploaded.stream,
++            resource_type="image",
++            folder="kulot-friends-chat/profiles",
++            public_id=f"user-{int(user['id'])}-{uuid.uuid4().hex}",
++            overwrite=False,
++            transformation=[{"width": 720, "height": 720, "crop": "limit", "quality": "auto"}],
++        )
++        url = str(result.get("secure_url") or "")
++        public_id = str(result.get("public_id") or "") or None
++        if not url:
++            raise RuntimeError("Cloud media storage did not return a secure URL.")
++        return url, public_id
++    stored_name = f"profile-{int(user['id'])}-{uuid.uuid4().hex}{extension}"
++    uploaded.save(PROFILE_UPLOAD_DIR / stored_name)
++    return url_for("profile_uploaded_file", filename=stored_name), None
++
++
++@app.patch("/api/mobile/profile")
++@mobile_token_required
++def mobile_update_profile() -> Any:
++    user = mobile_current_user()
++    data = request.get_json(silent=True) or {}
++    fields: list[str] = []
++    params: list[Any] = []
++    if "bio" in data:
++        bio = str(data.get("bio", "")).strip()
++        if len(bio) > 160:
++            return json_error("Bios are limited to 160 characters.")
++        fields.append("bio_text = ?")
++        params.append(bio or None)
++    if "note" in data:
++        note = str(data.get("note", "")).strip()
++        if len(note) > 60:
++            return json_error("Notes are limited to 60 characters.")
++        fields.extend(["note_text = ?", "note_expires_at = ?"])
++        params.extend([
++            note or None,
++            (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat() if note else None,
++        ])
++    if fields:
++        params.append(int(user["id"]))
++        with db_connect() as db:
++            db_execute(db, f"UPDATE users SET {', '.join(fields)} WHERE id = ?", tuple(params))
++    refreshed = user_by_id(int(user["id"]))
++    if not refreshed:
++        return json_error("Could not reload the profile.", 500)
++    profile = profile_payload(refreshed)
++    emit_profile_update(profile)
++    return jsonify({"profile": profile})
++
++
++@app.post("/api/mobile/profile/picture")
++@mobile_token_required
++def mobile_update_profile_picture() -> Any:
++    user = mobile_current_user()
++    uploaded = request.files.get("file")
++    if not uploaded or not uploaded.filename:
++        return json_error("Choose a profile picture first.")
++    if (request.content_length or 0) > PROFILE_MAX_UPLOAD_MB * 1024 * 1024:
++        return json_error(f"Profile pictures are limited to {PROFILE_MAX_UPLOAD_MB} MB.", 413)
++    old_url = str(user["profile_picture_url"] or "")
++    old_public_id = str(user["profile_picture_public_id"] or "")
++    try:
++        picture_url, new_public_id = mobile_store_profile_picture(user, uploaded)
++    except ValueError as exc:
++        return json_error(str(exc))
++    except Exception as exc:
++        app.logger.exception("Mobile profile picture upload failed")
++        return json_error(f"Profile picture upload failed: {exc}", 502)
++    with db_connect() as db:
++        db_execute(
++            db,
++            "UPDATE users SET profile_picture_url = ?, profile_picture_public_id = ? WHERE id = ?",
++            (picture_url, new_public_id, int(user["id"])),
++        )
++    if USE_CLOUDINARY and old_public_id and old_public_id != (new_public_id or ""):
++        try:
++            cloudinary.uploader.destroy(old_public_id, resource_type="image", invalidate=True)
++        except Exception:
++            app.logger.warning("Could not remove old mobile profile picture.")
++    elif old_url.startswith("/profile-uploads/"):
++        (PROFILE_UPLOAD_DIR / old_url.rsplit("/", 1)[-1]).unlink(missing_ok=True)
++    refreshed = user_by_id(int(user["id"]))
++    profile = profile_payload(refreshed) if refreshed else profile_payload(user)
++    emit_profile_update(profile)
++    return jsonify({"profile": profile})
++
++
++@app.delete("/api/mobile/profile/picture")
++@mobile_token_required
++def mobile_remove_profile_picture() -> Any:
++    user = mobile_current_user()
++    old_url = str(user["profile_picture_url"] or "")
++    old_public_id = str(user["profile_picture_public_id"] or "")
++    with db_connect() as db:
++        db_execute(
++            db,
++            "UPDATE users SET profile_picture_url = NULL, profile_picture_public_id = NULL WHERE id = ?",
++            (int(user["id"]),),
++        )
++    if USE_CLOUDINARY and old_public_id:
++        try:
++            cloudinary.uploader.destroy(old_public_id, resource_type="image", invalidate=True)
++        except Exception:
++            app.logger.warning("Could not remove mobile profile picture.")
++    elif old_url.startswith("/profile-uploads/"):
++        (PROFILE_UPLOAD_DIR / old_url.rsplit("/", 1)[-1]).unlink(missing_ok=True)
++    refreshed = user_by_id(int(user["id"]))
++    profile = profile_payload(refreshed) if refreshed else {**profile_payload(user), "profile_picture_url": None}
++    emit_profile_update(profile)
++    return jsonify({"profile": profile})
++
++
++@app.post("/api/mobile/conversations/<int:conversation_id>/profile")
++@mobile_token_required
++def mobile_update_group_profile(conversation_id: int) -> Any:
++    user = mobile_current_user()
++    user_id = int(user["id"])
++    if not is_conversation_member(conversation_id, user_id):
++        return json_error("Group chat not found.", 404)
++    with db_connect() as db:
++        conversation = db_execute(
++            db,
++            """
++            SELECT id, name, conversation_type, profile_picture_url, profile_picture_public_id
++            FROM conversations WHERE id = ?
++            """,
++            (conversation_id,),
++        ).fetchone()
++    if not conversation or str(conversation["conversation_type"]) != "group":
++        return json_error("Only group chats can be edited.")
++    name = str(request.form.get("name", conversation["name"] or "")).strip()
++    if not 1 <= len(name) <= 60:
++        return json_error("Group name must be 1–60 characters.")
++    uploaded = request.files.get("file")
++    remove_picture = str(request.form.get("remove_picture", "")).lower() == "true"
++    old_url = str(conversation["profile_picture_url"] or "")
++    old_public_id = str(conversation["profile_picture_public_id"] or "")
++    picture_url: str | None = old_url or None
++    picture_public_id: str | None = old_public_id or None
++    replace_old = False
++    if uploaded and uploaded.filename:
++        original_name = secure_filename(uploaded.filename)
++        classification = classify_upload(original_name, uploaded.mimetype or "")
++        if not classification or classification[0] != "image":
++            return json_error("Group pictures must be JPG, PNG, GIF, or WEBP.")
++        if USE_CLOUDINARY:
++            try:
++                result = cloudinary.uploader.upload(
++                    uploaded.stream,
++                    resource_type="image",
++                    folder="kulot-friends-chat/groups",
++                    public_id=f"group-{conversation_id}-{uuid.uuid4().hex}",
++                    overwrite=False,
++                    transformation=[{"width": 1024, "height": 1024, "crop": "limit", "quality": "auto"}],
++                )
++                picture_url = str(result.get("secure_url") or "")
++                picture_public_id = str(result.get("public_id") or "") or None
++                if not picture_url:
++                    raise RuntimeError("Cloud media storage did not return a secure URL.")
++            except Exception as exc:
++                app.logger.exception("Mobile group picture upload failed")
++                return json_error(f"Group picture upload failed: {exc}", 502)
++        else:
++            stored_name = f"group-{conversation_id}-{uuid.uuid4().hex}{classification[1]}"
++            uploaded.save(GROUP_UPLOAD_DIR / stored_name)
++            picture_url = url_for("group_uploaded_file", filename=stored_name)
++            picture_public_id = None
++        replace_old = True
++    elif remove_picture:
++        picture_url = None
++        picture_public_id = None
++        replace_old = True
++    with db_connect() as db:
++        db_execute(
++            db,
++            "UPDATE conversations SET name = ?, profile_picture_url = ?, profile_picture_public_id = ? WHERE id = ?",
++            (name, picture_url, picture_public_id, conversation_id),
++        )
++    if replace_old and old_url and (old_url != (picture_url or "") or old_public_id != (picture_public_id or "")):
++        remove_group_picture_file(old_url, old_public_id)
++    payload = conversation_payload(conversation_id, user_id)
++    emit_to_conversation_members("conversation_profile_updated", {"conversation": payload}, conversation_id)
++    return jsonify({"conversation": payload})
++
++
++@app.post("/api/mobile/conversations/<int:conversation_id>/leave")
++@mobile_token_required
++def mobile_leave_group(conversation_id: int) -> Any:
++    user = mobile_current_user()
++    user_id = int(user["id"])
++    username = str(user["username"])
++    if not is_conversation_member(conversation_id, user_id):
++        return json_error("Group chat not found.", 404)
++    with db_connect() as db:
++        conversation = db_execute(
++            db,
++            "SELECT id, conversation_type, created_by, is_default, profile_picture_url, profile_picture_public_id FROM conversations WHERE id = ?",
++            (conversation_id,),
++        ).fetchone()
++        if not conversation or str(conversation["conversation_type"]) != "group":
++            return json_error("Only group chats can be left.")
++        if bool(conversation["is_default"]):
++            return json_error("You cannot leave the main Kulot Friends group.")
++        db_execute(db, "DELETE FROM conversation_members WHERE conversation_id = ? AND user_id = ?", (conversation_id, user_id))
++        remaining = db_execute(
++            db,
++            "SELECT user_id FROM conversation_members WHERE conversation_id = ? ORDER BY joined_at, user_id",
++            (conversation_id,),
++        ).fetchall()
++        deleted = not remaining
++        if deleted:
++            db_execute(db, "DELETE FROM conversations WHERE id = ?", (conversation_id,))
++        elif int(conversation["created_by"] or 0) == user_id:
++            db_execute(db, "UPDATE conversations SET created_by = ? WHERE id = ?", (int(remaining[0]["user_id"]), conversation_id))
++    if deleted:
++        remove_group_picture_file(str(conversation["profile_picture_url"] or ""), str(conversation["profile_picture_public_id"] or ""))
++    else:
++        emit_to_conversation_members(
++            "conversation_members_updated",
++            {"conversation_id": conversation_id, "left_username": username},
++            conversation_id,
++        )
++    return jsonify({"left": True, "conversation_id": conversation_id, "deleted": deleted})
++
++
++@app.post("/api/mobile/account/delete")
++@mobile_token_required
++def mobile_delete_account() -> Any:
++    user = mobile_current_user()
++    data = request.get_json(silent=True) or {}
++    password = str(data.get("password", ""))
++    if not check_password_hash(str(user["password_hash"]), password):
++        return json_error("Password is incorrect.", 403)
++    user_id = int(user["id"])
++    with db_connect() as db:
++        db_execute(db, "DELETE FROM users WHERE id = ?", (user_id,))
++    return jsonify({"deleted": True})
++
++
+ init_db()
+ ensure_default_conversation()
+ 

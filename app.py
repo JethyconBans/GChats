@@ -10,14 +10,13 @@ import secrets
 import sqlite3
 import threading
 import uuid
-from contextlib import contextmanager
 from io import BytesIO
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
-from typing import Any, Callable, Iterator, TypeVar
+from typing import Any, Callable, TypeVar
 
 import psycopg
 from psycopg.rows import dict_row
@@ -114,29 +113,16 @@ F = TypeVar("F", bound=Callable[..., Any])
 DbRow = sqlite3.Row | dict[str, Any]
 
 
-@contextmanager
-def db_connect() -> Iterator[sqlite3.Connection | psycopg.Connection[Any]]:
-    """Open a database connection and always close it after use."""
+def db_connect() -> sqlite3.Connection | psycopg.Connection[Any]:
+    """Use cloud Postgres when DATABASE_URL exists; otherwise use local SQLite."""
     if USE_POSTGRES:
-        connection: sqlite3.Connection | psycopg.Connection[Any] = psycopg.connect(
-            DATABASE_URL,
-            row_factory=dict_row,
-        )
-    else:
-        sqlite_connection = sqlite3.connect(DATABASE_PATH, timeout=10)
-        sqlite_connection.row_factory = sqlite3.Row
-        sqlite_connection.execute("PRAGMA foreign_keys = ON")
-        sqlite_connection.execute("PRAGMA journal_mode = WAL")
-        connection = sqlite_connection
+        return psycopg.connect(DATABASE_URL, row_factory=dict_row)
 
-    try:
-        yield connection
-        connection.commit()
-    except Exception:
-        connection.rollback()
-        raise
-    finally:
-        connection.close()
+    connection = sqlite3.connect(DATABASE_PATH, timeout=10)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys = ON")
+    connection.execute("PRAGMA journal_mode = WAL")
+    return connection
 
 
 def db_execute(
